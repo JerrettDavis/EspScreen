@@ -4,14 +4,13 @@
 #include "builtin/about.h"
 #include "builtin/claude_stub.h"
 #include "builtin/calculator_stub.h"
-#include "builtin/calibrate.h"
+// calibrate.h intentionally excluded — cal is disabled (touch uses factory defaults)
 
 namespace app_registry {
 
 const AppEntry kBuiltinApps[] = {
     { "settings",    "Settings",    LV_SYMBOL_SETTINGS,  settings::create_screen    },
     { "touch_test",  "Touch Test",  LV_SYMBOL_OK,        touch_test::create_screen  },
-    { "calibrate",   "Calibrate",   LV_SYMBOL_EDIT,      calibrate::create_screen   },
     { "about",       "About",       LV_SYMBOL_LIST,       about::create_screen       },
     { "claude",      "Claude",      LV_SYMBOL_WIFI,       claude_stub::create_screen },
     { "calculator",  "Calculator",  LV_SYMBOL_EDIT,       calculator_stub::create_screen },

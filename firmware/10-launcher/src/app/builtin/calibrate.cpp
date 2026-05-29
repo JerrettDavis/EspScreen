@@ -1,3 +1,8 @@
+// DISABLED — see touch.cpp for active touch path.
+// Touch now uses Phase 0 TFT_eSPI built-in mapping with factory cal {275, 3620, 264, 3532, 1}.
+// This file is retained for reference only; it is not compiled into the build.
+// To re-enable: add calibrate.h back to app_registry.cpp and main.cpp.
+
 /**
  * calibrate.cpp — Hold-to-settle touch calibration screen.
  *

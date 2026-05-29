@@ -53,8 +53,8 @@ void check() {
     Serial.println("================================================");
     Serial.println("EspScreen " ESPSCREEN_VERSION " — Recovery window: 5s");
     Serial.println("  'reset' — factory reset (wipes NVS + FS)");
-    Serial.println("  'cal'   — launch touch calibration after boot");
     Serial.println("  Hold BOOT button 3s — factory reset");
+    Serial.println("  (touch uses factory defaults — 'cal' is disabled)");
     Serial.println("================================================");
 
     /* ── Configure GPIO0 with internal pullup ───────────────────── */
@@ -98,8 +98,7 @@ void check() {
                     factory_reset();
                     /* Never returns */
                 } else if (serial_buf.equalsIgnoreCase("cal")) {
-                    s_pending_cal = 1;
-                    Serial.println("[recovery] Cal requested — will launch after LVGL init");
+                    Serial.println("[recovery] 'cal' is disabled — touch uses factory defaults");
                 }
                 serial_buf = "";
             } else {
