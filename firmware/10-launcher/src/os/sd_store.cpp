@@ -5,25 +5,25 @@
 #include <Arduino.h>
 #include <SD.h>
 #include <SPI.h>
-#include <TFT_eSPI.h>
 
 /**
- * sd_store — SD card on the shared SPI bus (SCLK=14, MOSI=13, MISO=12).
+ * sd_store — SD card on a dedicated VSPI bus (SCK=18, MISO=19, MOSI=23, CS=5).
+ *
+ * Board: Sunton ESP32-3248S035 / Cheap Yellow Display 3.5" ST7796 variant.
  *
  * CRITICAL SPI wiring notes:
- *   - The board uses SCLK=14/MOSI=13/MISO=12 for ALL SPI peripherals.
- *   - TFT_eSPI (CONFIG_IDF_TARGET_ESP32, no USE_HSPI_PORT) creates its own
- *     SPIClass(VSPI) instance.  We MUST obtain that same instance via
- *     TFT_eSPI::getSPIinstance() and pass it to SD.begin() — never call
- *     the single-arg SD.begin(PIN_SD_CS) which would re-init SPI on the
- *     default (VSPI) pins and clobber the display bus state.
- *   - PIN_SD_CS is driven HIGH before SD.begin() so a floating CS line
- *     cannot corrupt TFT frames during the probe.
+ *   - The display (ST7796) is on HSPI: SCLK=14, MOSI=13, MISO=12, CS=15.
+ *   - The SD card is on a SEPARATE VSPI bus: SCK=18, MISO=19, MOSI=23, CS=5.
+ *   - We create our own SPIClass(VSPI) instance s_sd_spi and begin() it on
+ *     the SD pins.  We do NOT touch TFT_eSPI's bus at all.
+ *   - This eliminates all shared-bus contention and "Select Failed" errors
+ *     that occurred when the old code clocked the wrong (display) pins.
  *
  * SD library: bundled with arduino-esp32 (no external lib_deps entry).
  */
 
-static bool s_mounted = false;
+static bool     s_mounted = false;
+static SPIClass s_sd_spi(VSPI);
 
 /* Token-cache and directory paths */
 static constexpr const char* kSdDir       = "/espscreen";
@@ -32,61 +32,47 @@ static constexpr const char* kTokenPath   = "/espscreen/tokens.json";
 namespace sd_store {
 
 bool init() {
-    /* Drive ALL SPI CS lines HIGH before touching the bus.
-     *
-     * Rationale: after display and touch init the TFT/touch CS lines may
-     * be floating or in an indeterminate state.  If either CS is asserted
-     * low while we probe the SD, the bus will be corrupted and the SD card
-     * will not respond.  Explicitly drive all three CS lines HIGH here so
-     * only our SD CS transitions during SD.begin.
-     *
-     * PIN_TFT_CS=15, PIN_TOUCH_CS=33, PIN_SD_CS=5 (from pinmap.h).
-     * TFT and touch are already configured as outputs by their drivers;
-     * we still call pinMode to be safe in case ordering changes.
-     */
-    pinMode(PIN_TFT_CS,   OUTPUT); digitalWrite(PIN_TFT_CS,   HIGH);
-    pinMode(PIN_TOUCH_CS, OUTPUT); digitalWrite(PIN_TOUCH_CS, HIGH);
-    pinMode(PIN_SD_CS,    OUTPUT); digitalWrite(PIN_SD_CS,    HIGH);
+    /* SD is on its own VSPI bus (SCK=18, MISO=19, MOSI=23, CS=5).
+     * Drive CS HIGH immediately so the card does not see a spurious
+     * assertion while the bus is being initialised. */
+    pinMode(PIN_SD_CS, OUTPUT);
+    digitalWrite(PIN_SD_CS, HIGH);
 
-    /* Brief settling delay: let the bus stabilise after display/touch init
-     * before the SD probe drives CS low for the first time. */
+    /* Brief settling delay before the first probe. */
     delay(20);
 
-    /* Obtain the SPIClass that TFT_eSPI already initialised.
-     * TFT_eSPI creates SPIClass(VSPI) internally (ESP32 default); we
-     * must reuse that exact instance — never start a second one. */
-    SPIClass& shared_spi = TFT_eSPI::getSPIinstance();
+    /* Start the dedicated VSPI bus on the SD pins.
+     * This is completely independent of TFT_eSPI's HSPI bus. */
+    s_sd_spi.begin(PIN_SD_SCK, PIN_SD_MISO, PIN_SD_MOSI, PIN_SD_CS);
 
-    /* SD.begin probes the bus — must hold the arbiter lock so the display
-     * CS line cannot be asserted simultaneously by another caller.
+    /* Retry loop: first attempt at SD_SCK_HZ (20 MHz); fall back to 4 MHz
+     * on subsequent attempts (some cards are slow to power-up).
      *
-     * Clock speed: 20 MHz was too aggressive on a shared bus with display
-     * stubs.  Use SD_SCK_HZ (now 4 MHz) for reliable card initialisation.
-     * The card negotiates its own higher speed after GO_IDLE / CMD0.
-     *
-     * Retry: some cards need a second probe attempt after the bus settles
-     * following display init.  Try up to 3 times with a CS-toggle reset
-     * between attempts.
-     */
+     * spi_bus::lock/unlock are kept as harmless no-ops — they guard the
+     * display HSPI bus, not this VSPI bus.  Keeping them avoids having to
+     * audit every call-site and costs nothing on a cooperative single-loop
+     * system. */
     bool ok = false;
+    const uint32_t speeds[] = { SD_SCK_HZ, 4000000UL };
     for (int attempt = 1; attempt <= 3 && !ok; ++attempt) {
-        /* Toggle CS low then high to reset any partially-clocked card state
-         * before each attempt. */
+        /* Toggle CS to reset any partially-clocked card state. */
         digitalWrite(PIN_SD_CS, LOW);
         delayMicroseconds(10);
         digitalWrite(PIN_SD_CS, HIGH);
         delay(5);
 
+        uint32_t hz = speeds[(attempt > 1) ? 1 : 0];  // slow fallback from attempt 2
+
         if (!spi_bus::lock(500)) {
             LOG_W("sd", "init: bus lock timeout (attempt %d)", attempt);
             break;
         }
-        SD.end();                                           // no-op on first attempt; cleans up on retry
-        ok = SD.begin(PIN_SD_CS, shared_spi, SD_SCK_HZ);
+        SD.end();   // no-op on first attempt; cleans up on retry
+        ok = SD.begin(PIN_SD_CS, s_sd_spi, hz);
         spi_bus::unlock();
 
         if (!ok) {
-            LOG_W("sd", "SD.begin attempt %d failed", attempt);
+            LOG_W("sd", "SD.begin attempt %d failed (hz=%lu)", attempt, (unsigned long)hz);
             delay(50);
         }
     }

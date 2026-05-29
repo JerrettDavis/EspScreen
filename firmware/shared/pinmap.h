@@ -17,5 +17,11 @@
 #define PIN_TOUCH_CS  33
 #define PIN_TOUCH_IRQ 36   // Input-only GPIO; no pull-up needed (board has it)
 
-// ── SD CARD (shared SPI bus) ──────────────────────────────────────────────────
+// ── SD CARD (dedicated VSPI bus — NOT shared with display/touch) ─────────────
+// Board: Sunton ESP32-3248S035 / CYD 3.5" ST7796 variant.
+// SD is wired to the ESP32 VSPI bus (GPIO 18/19/23/5), separate from
+// the display/touch bus (HSPI: GPIO 14/13/12).
 #define PIN_SD_CS      5
+#define PIN_SD_SCK    18
+#define PIN_SD_MISO   19
+#define PIN_SD_MOSI   23
