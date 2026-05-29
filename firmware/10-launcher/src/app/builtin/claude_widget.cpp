@@ -175,11 +175,11 @@ static void apply_json(const char* json_str) {
         set_bar_value(s_bar_5h, pct5h);
         char pct_buf[16];
         snprintf(pct_buf, sizeof(pct_buf), "%d%%", pct5h);
-        lv_label_set_text(s_lbl_5h_pct, pct_buf);
+        if (s_lbl_5h_pct)   lv_label_set_text(s_lbl_5h_pct, pct_buf);
         char dur_buf[24], reset_buf[40];
         fmt_duration(dur_buf, sizeof(dur_buf), reset5h);
         snprintf(reset_buf, sizeof(reset_buf), "Resets in %s", dur_buf);
-        lv_label_set_text(s_lbl_5h_reset, reset_buf);
+        if (s_lbl_5h_reset) lv_label_set_text(s_lbl_5h_reset, reset_buf);
     }
 
     /* seven_day */
@@ -201,18 +201,18 @@ static void apply_json(const char* json_str) {
         set_bar_value(s_bar_7d, pct7d);
         char pct_buf[16];
         snprintf(pct_buf, sizeof(pct_buf), "%d%%", pct7d);
-        lv_label_set_text(s_lbl_7d_pct, pct_buf);
+        if (s_lbl_7d_pct)   lv_label_set_text(s_lbl_7d_pct, pct_buf);
         char dur_buf[24], reset_buf[40];
         fmt_duration(dur_buf, sizeof(dur_buf), reset7d);
         snprintf(reset_buf, sizeof(reset_buf), "Resets in %s", dur_buf);
-        lv_label_set_text(s_lbl_7d_reset, reset_buf);
+        if (s_lbl_7d_reset) lv_label_set_text(s_lbl_7d_reset, reset_buf);
     }
 
     /* Session fields — not present in the usage API, show placeholders */
-    lv_label_set_text(s_lbl_model, "Claude");
-    lv_label_set_text(s_lbl_cost, "---");
-    lv_label_set_text(s_lbl_context, "---");
-    lv_label_set_text(s_lbl_cache_ttl, "---");
+    if (s_lbl_model)     lv_label_set_text(s_lbl_model, "Claude");
+    if (s_lbl_cost)      lv_label_set_text(s_lbl_cost, "---");
+    if (s_lbl_context)   lv_label_set_text(s_lbl_context, "---");
+    if (s_lbl_cache_ttl) lv_label_set_text(s_lbl_cache_ttl, "---");
 
     /* Headroom — not available in direct-API mode */
     if (s_headroom_cont) lv_obj_add_flag(s_headroom_cont, LV_OBJ_FLAG_HIDDEN);
@@ -220,9 +220,60 @@ static void apply_json(const char* json_str) {
     stamp_update_time();
 }
 
+/* ── Screen delete event — null all widget statics and timers ──────────── */
+/*
+ * Option A (screen-lifetime timers) + Option B (null guards in apply_json).
+ *
+ * Belt-and-suspenders approach:
+ *   1. LV_EVENT_DELETE on s_screen stops timers and nulls all widget pointers
+ *      so that any in-flight poll callback touching LVGL gets a clean no-op.
+ *   2. poll_now() bails immediately if s_screen is nullptr — covers the case
+ *      where the serial command "claude poll" fires before the user has ever
+ *      opened the Claude tile (screen never created) or after they navigated
+ *      away and delete_screen() was called by the app registry.
+ *   3. apply_json() null-checks every label before lv_label_set_text() so
+ *      a race between an in-flight HTTP response and screen destruction can't
+ *      produce an assertion failure.
+ */
+static void screen_delete_cb(lv_event_t* /*e*/) {
+    /* Stop timers so no further poll callbacks fire after screen is freed */
+    if (s_poll_timer)      { lv_timer_delete(s_poll_timer);      s_poll_timer      = nullptr; }
+    if (s_immediate_timer) { lv_timer_delete(s_immediate_timer); s_immediate_timer = nullptr; }
+    /* Null all widget pointers — any in-flight UI update will no-op */
+    s_screen          = nullptr;
+    s_dot_connected   = nullptr;
+    s_lbl_model       = nullptr;
+    s_bar_5h          = nullptr;
+    s_lbl_5h_pct      = nullptr;
+    s_lbl_5h_reset    = nullptr;
+    s_bar_7d          = nullptr;
+    s_lbl_7d_pct      = nullptr;
+    s_lbl_7d_reset    = nullptr;
+    s_lbl_cost        = nullptr;
+    s_lbl_context     = nullptr;
+    s_lbl_cache_ttl   = nullptr;
+    s_headroom_cont   = nullptr;
+    s_lbl_tokens_saved= nullptr;
+    s_lbl_compression = nullptr;
+    s_lbl_updated     = nullptr;
+    s_badge_stale     = nullptr;
+    s_badge_expired   = nullptr;
+    s_lbl_status      = nullptr;
+    s_lbl_title       = nullptr;
+    LOG_I("claude_w", "screen_delete_cb: timers stopped, widget statics nulled");
+}
+
 /* ── HTTPS poll ───────────────────────────────────────────────────────── */
 
 void poll_now() {
+    /* Guard: bail immediately if screen has never been created or was destroyed.
+     * This covers the "claude poll" serial command firing before the user opens
+     * the Claude tile, or after they navigated away. */
+    if (!s_screen) {
+        LOG_I("claude_w", "poll_now: no screen — skipping (open the Claude tile first)");
+        return;
+    }
+
     if (!wifi_profiles::is_connected()) {
         set_connected(false);
         set_status("WiFi not connected");
@@ -407,6 +458,10 @@ lv_obj_t* create_screen() {
     lv_obj_set_style_border_width(scr, 0, 0);
     lv_obj_set_style_pad_all(scr, 0, 0);
     s_screen = scr;
+
+    /* Register delete callback so timers and widget statics are nulled if
+     * LVGL frees this screen (e.g. lv_obj_del called from outside this widget). */
+    lv_obj_add_event_cb(scr, screen_delete_cb, LV_EVENT_DELETE, nullptr);
 
     /* ── Top bar ──────────────────────────────────────────────────────── */
     lv_obj_t* topbar = lv_obj_create(scr);

@@ -16,6 +16,9 @@ __pycache__/
 *.pyc
 *.pyo
 
+# Node deps
+node_modules/
+
 # Secrets / environment
 tools/keys/
 secrets.json
