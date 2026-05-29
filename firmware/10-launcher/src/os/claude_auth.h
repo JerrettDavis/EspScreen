@@ -9,12 +9,16 @@
  *   Namespace "claude"       → count (u8), active (u8)
  *   Namespace "cl_p<N>"     → label (str), access (str), refresh (str), expires_at (i64 via two i32)
  *
- * Max 4 profiles.  Provisioned via serial commands (see main.cpp).
+ * Max 4 profiles.  Provisioned via serial commands (see main.cpp) or WiFi push
+ * via the HTTP API server (api_server.h).
  *
- * Token refresh: NOT implemented in v1.  The Anthropic OAuth refresh endpoint
- * is not documented in the public API or any reference source examined.
- * Tokens are valid ~8 hours; user re-pastes when expired via:
- *   claude token set "<label>" <access> <refresh> <expires_unix_sec>
+ * Token refresh: implemented via Anthropic's OAuth token endpoint.
+ *   URL:     https://platform.claude.com/v1/oauth/token
+ *   Method:  POST application/json
+ *   Body:    { grant_type: "refresh_token", refresh_token: "<rt>",
+ *              client_id: "9d1c250a-e61b-44d9-88ed-5944d1962f5e",
+ *              scope: "user:profile user:inference user:sessions:claude_code user:mcp_servers" }
+ *   Returns: { access_token, refresh_token (if rotated), expires_in (seconds) }
  *
  * TODO: pin Anthropic CA cert (currently using setInsecure()).
  */
@@ -79,5 +83,27 @@ String get_active_label();
 
 /** Check whether the active token appears to be expired. */
 bool is_token_expired();
+
+/**
+ * Refresh the active profile's tokens against Anthropic's OAuth endpoint.
+ * Requires WiFi to be connected.  Blocks until the HTTP round-trip completes
+ * or times out (10 s).
+ *
+ * On success: NVS is updated with the new access token, (possibly rotated)
+ *             refresh token, and new expiry.  Returns true.
+ * On failure: NVS is left unchanged.  Returns false.
+ *             Reason is logged via LOG_W.
+ */
+bool refresh_active();
+
+/**
+ * Set tokens by label string (convenience for the HTTP API server).
+ * Finds profile by label, then calls set_tokens().
+ * Returns false if label not found or set_tokens fails.
+ */
+bool set_tokens_by_label(const char* label,
+                          const char* access,
+                          const char* refresh_tok,
+                          int64_t     expires_unix);
 
 } // namespace claude_auth

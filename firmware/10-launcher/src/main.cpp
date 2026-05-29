@@ -38,6 +38,10 @@
 #include "os/wifi_profiles.h"
 #include "os/claude_auth.h"
 #include "os/nvs_store.h"
+#include "os/api_server.h"
+#include "os/net_manager.h"
+#include "os/web_portal.h"
+#include "os/sd_store.h"
 #include "ui/theme.h"
 #include "app/builtin/launcher.h"
 #include "app/builtin/claude_widget.h"
@@ -81,8 +85,19 @@ void setup() {
     touch::init();
 #endif
 
-    /* ── WiFi init (multi-network, priority-ordered) ─────────────── */
-    wifi_profiles::init();
+    /* ── SD card init (after display/touch; graceful if absent) ─────
+     * Required integration point for the sd_store parallel worker.    */
+    sd_store::init();
+
+    /* ── Import config overrides from SD if a config file is present ─
+     * config::import_from_sd_if_present() is added by the SD worker. */
+    config::import_from_sd_if_present();
+
+    /* ── WiFi + portal state machine ────────────────────────────────
+     * net_manager::init() calls wifi_profiles::init() internally,
+     * then drives Boot → StaConnecting → StaConnected / ApPortal.
+     * api_server::begin() is called from net_manager on STA connect. */
+    net_manager::init();
 
     /* ── Claude auth init (profile validation) ───────────────────── */
     claude_auth::init();
@@ -99,7 +114,8 @@ void setup() {
 
     Serial.println("[main] Serial commands: tdbg | info | reset");
     Serial.println("[main]   wifi: add | remove | list | prefer | clear | status");
-    Serial.println("[main]   claude: profile add/remove/list/use | token set | poll | get");
+    Serial.println("[main]   claude: profile add/remove/list/use | token set | refresh | poll | get");
+    Serial.println("[main]   api: set-secret <secret> | status");
 }
 
 /* ── Quote-aware argument splitter ──────────────────────────────────
@@ -361,6 +377,15 @@ static void dispatch_serial_cmd(const String& cmd) {
                 Serial.printf("[claude] Unknown token subcommand: '%s'\n", tsub.c_str());
             }
 
+        /* ── claude refresh ─────────────────────────────────────── */
+        } else if (sub == "refresh") {
+            Serial.println("[claude] Attempting OAuth token refresh...");
+            if (claude_auth::refresh_active()) {
+                Serial.println("[claude] Token refresh OK — new token stored in NVS");
+            } else {
+                Serial.println("[claude] Token refresh FAILED — check WiFi and logs");
+            }
+
         /* ── claude poll ─────────────────────────────────────────── */
         } else if (sub == "poll") {
             Serial.println("[claude] Forcing immediate poll...");
@@ -389,9 +414,70 @@ static void dispatch_serial_cmd(const String& cmd) {
             Serial.println("[claude] Subcommands: profile | token | poll | get | set(deprecated)");
         }
 
+    /* ── API server commands ─────────────────────────────────────── */
+    } else if (verb == "api") {
+        if (argc < 2) {
+            Serial.println("[api] Usage: api <set-secret|status>");
+            return;
+        }
+        String sub = argv[1];
+        sub.toLowerCase();
+
+        if (sub == "set-secret") {
+            if (argc < 3) {
+                Serial.println("[api] Usage: api set-secret <secret>");
+                Serial.println("[api]        Use empty string (\"\") to clear.");
+                return;
+            }
+            api_server::set_secret(argv[2].c_str());
+            Serial.printf("[api] Secret %s\n",
+                          argv[2].length() > 0 ? "updated" : "cleared");
+
+        } else if (sub == "status") {
+            Serial.printf("[api] %s\n", api_server::status_str().c_str());
+
+        } else {
+            Serial.printf("[api] Unknown subcommand: '%s'\n", sub.c_str());
+            Serial.println("[api] Subcommands: set-secret | status");
+        }
+
+    /* ── Net manager commands ───────────────────────────────────── */
+    } else if (verb == "net") {
+        if (argc < 2) {
+            Serial.println("[net] Usage: net <status|portal>");
+            return;
+        }
+        String sub = argv[1];
+        sub.toLowerCase();
+
+        if (sub == "status") {
+            const char* mode_name = "unknown";
+            switch (net_manager::mode()) {
+                case net_manager::Mode::Boot:          mode_name = "Boot";          break;
+                case net_manager::Mode::StaConnecting: mode_name = "StaConnecting"; break;
+                case net_manager::Mode::StaConnected:  mode_name = "StaConnected";  break;
+                case net_manager::Mode::ApPortal:      mode_name = "ApPortal";      break;
+                case net_manager::Mode::ApStaRetry:    mode_name = "ApStaRetry";    break;
+            }
+            Serial.printf("[net] mode=%s  ip=%s  ap_ssid=%s  portal=%s\n",
+                          mode_name,
+                          net_manager::ip_string().c_str(),
+                          net_manager::ap_ssid(),
+                          web_portal::active() ? "active" : "inactive");
+
+        } else if (sub == "portal") {
+            net_manager::force_portal();
+            Serial.printf("[net] Captive portal forced — connect to '%s'\n",
+                          net_manager::ap_ssid());
+
+        } else {
+            Serial.printf("[net] Unknown subcommand: '%s'\n", sub.c_str());
+            Serial.println("[net] Subcommands: status | portal");
+        }
+
     } else {
         Serial.printf("[main] Unknown command: '%s'\n", cmd.c_str());
-        Serial.println("[main] Commands: cal | tdbg | info | reset | wifi | claude");
+        Serial.println("[main] Commands: cal | tdbg | info | reset | wifi | claude | api | net");
     }
 }
 
@@ -401,6 +487,16 @@ static int s_loop_count = 0;
 
 void loop() {
     lv_timer_handler();
+
+    /* net_manager drives WiFi state machine + DNS pump + web portal.
+     * net_manager::loop() calls web_portal::handle() unconditionally at its
+     * entry before any switch/return, so it is pumped exactly once per loop.
+     * Must be called unconditionally — never early-return before this. */
+    net_manager::loop();
+
+    /* api_server pumps its WebServer(:8080) — started by net_manager
+     * on STA connect; handle() is a no-op until begin() has been called. */
+    api_server::handle();
 
     if (s_loop_count < 100) {
         s_loop_count++;

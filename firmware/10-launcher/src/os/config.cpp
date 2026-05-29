@@ -1,5 +1,6 @@
 #include "config.h"
 #include "logger.h"
+#include "sd_store.h"
 #include <Arduino.h>
 #include <LittleFS.h>
 #include <ArduinoJson.h>
@@ -88,6 +89,7 @@ static bool copy_default() {
 
 /* Apply parsed JsonDocument to live structs, filling missing keys with defaults */
 static void apply_doc(JsonDocument& doc) {
+    init_defaults();   // idempotent (guarded); ensures kDefault* are populated
     /* device */
     const char* name = doc["device"]["name"] | kDefaultDevice.name;
     const char* mode = doc["device"]["mode"] | kDefaultDevice.mode;
@@ -148,5 +150,96 @@ const DisplayCfg& display() { return s_display; }
 const NetworkCfg& network() { return s_network; }
 const DeviceCfg&  device()  { return s_device;  }
 const AppsCfg&    apps()    { return s_apps;     }
+
+/* ── save_config ─────────────────────────────────────────────────
+ * Key-preservation approach:
+ *   1. Load the EXISTING /config.json from LittleFS into a JsonDocument.
+ *      This captures all keys the firmware does not model (e.g. leds,
+ *      security, apps.claude_widget, logging).
+ *   2. Mutate ONLY the keys the firmware actually owns.
+ *   3. Re-serialise back to /config.json — unknown keys survive intact.
+ *
+ * If the file is absent or unparseable we fall back to writing a fresh
+ * document (same behaviour as having no unknown keys).
+ */
+bool save_config() {
+    JsonDocument doc;
+
+    /* Load existing file to preserve unknown keys */
+    if (LittleFS.exists("/config.json")) {
+        File f = LittleFS.open("/config.json", "r");
+        if (f) {
+            DeserializationError err = deserializeJson(doc, f);
+            f.close();
+            if (err) {
+                LOG_W("config", "save_config: re-parse failed (%s), starting fresh", err.c_str());
+                doc.clear();
+            }
+        }
+    }
+
+    /* Mutate only the keys this firmware models */
+    doc["device"]["name"] = s_device.name;
+    doc["device"]["mode"] = s_device.mode;
+
+    doc["display"]["rotation"]         = s_display.rotation;
+    doc["display"]["backlight_pct"]    = s_display.backlight_pct;
+    doc["display"]["idle_dim_pct"]     = s_display.idle_dim_pct;
+    doc["display"]["idle_timeout_sec"] = s_display.idle_timeout_sec;
+
+    doc["network"]["wifi"]["ssid"]     = s_network.ssid;
+    doc["network"]["wifi"]["password"] = s_network.password;
+    doc["network"]["wifi"]["hostname"] = s_network.hostname;
+
+    doc["apps"]["autostart"] = s_apps.autostart;
+
+    /* Write to LittleFS atomically via tmp → rename */
+    File lf = LittleFS.open("/config.json.tmp", "w");
+    if (!lf) { LOG_E("config", "save: open tmp failed"); return false; }
+    serializeJson(doc, lf);
+    lf.close();
+    if (LittleFS.exists("/config.json")) LittleFS.remove("/config.json");
+    if (!LittleFS.rename("/config.json.tmp", "/config.json")) {
+        LOG_E("config", "save: rename failed");
+        return false;
+    }
+    LOG_I("config", "save_config: LittleFS written");
+
+    /* Best-effort write to SD if available */
+    if (sd_store::available()) {
+        String sd_json;
+        serializeJson(doc, sd_json);
+        if (!sd_store::write_file("/espscreen/config.json", sd_json)) {
+            LOG_W("config", "save_config: SD write failed (LittleFS ok)");
+        }
+    }
+
+    return true;
+}
+
+/* ── import_from_sd_if_present ───────────────────────────────────
+ * No-op if no card or no /espscreen/config.json on it.
+ * Reuses the same apply_doc() path as load_config() for consistency.
+ */
+void import_from_sd_if_present() {
+    if (!sd_store::available()) return;
+    if (!sd_store::exists("/espscreen/config.json")) return;
+
+    String json;
+    if (!sd_store::read_file("/espscreen/config.json", json)) {
+        LOG_W("config", "import_from_sd: read failed");
+        return;
+    }
+
+    JsonDocument doc;
+    DeserializationError err = deserializeJson(doc, json);
+    if (err) {
+        LOG_E("config", "import_from_sd: parse error %s", err.c_str());
+        return;
+    }
+
+    apply_doc(doc);
+    LOG_I("config", "cfg src=SD");
+}
 
 } // namespace config

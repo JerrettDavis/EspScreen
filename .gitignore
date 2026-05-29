@@ -25,3 +25,7 @@ secrets.json
 *.local.json
 .env
 .env.*
+
+# Debug / test artifacts
+*.log
+firmware/**/*log_capture*.txt

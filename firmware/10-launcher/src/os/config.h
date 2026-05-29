@@ -37,4 +37,28 @@ namespace config {
     const NetworkCfg& network();
     const DeviceCfg&  device();
     const AppsCfg&    apps();
+
+    /**
+     * save_config() — persist the current config to LittleFS /config.json.
+     *
+     * Loads the EXISTING /config.json first, mutates only the keys the
+     * firmware models, then re-serialises — so unknown keys (apps.claude_widget,
+     * leds, security, logging, etc.) are preserved, not dropped.
+     *
+     * If sd_store::available(), also writes /espscreen/config.json to the SD
+     * card as a best-effort backup (failure → LOG_W, not a hard error).
+     *
+     * Returns true if the LittleFS write succeeded.
+     */
+    bool save_config();
+
+    /**
+     * import_from_sd_if_present() — if an SD card is mounted and
+     * /espscreen/config.json exists on it, read and apply that config.
+     *
+     * Call AFTER sd_store::init().  If no card or no file, this is a no-op
+     * (the LittleFS config loaded at boot stays in effect).
+     * Logs "cfg src=SD" on success.
+     */
+    void import_from_sd_if_present();
 }

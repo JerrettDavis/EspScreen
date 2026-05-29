@@ -6,11 +6,15 @@
  */
 
 #include "settings.h"
+#include "wifi_setup.h"
 #include "../../os/screen_router.h"
 #include "../../os/claude_auth.h"
 #include "../../os/wifi_profiles.h"
 #include "../../ui/widgets.h"
 #include "../../os/logger.h"
+#if __has_include("os/net_manager.h")
+#  include "os/net_manager.h"
+#endif
 #include <lvgl.h>
 #include <Arduino.h>
 
@@ -26,6 +30,10 @@ static void back_cb(lv_event_t* /*e*/) {
 static lv_obj_t* s_claude_screen = nullptr;
 
 static void claude_profiles_back_cb(lv_event_t* /*e*/) {
+    /* Delete the sub-screen before popping so it doesn't leak on the 48 KB heap.
+     * screen_router::pop() restores the previous screen but does NOT auto-delete
+     * the outgoing one. */
+    if (s_claude_screen) { lv_obj_delete(s_claude_screen); s_claude_screen = nullptr; }
     screen_router::pop();
 }
 
@@ -112,6 +120,8 @@ static lv_obj_t* create_claude_profiles_screen() {
 static lv_obj_t* s_wifi_screen = nullptr;
 
 static void wifi_networks_back_cb(lv_event_t* /*e*/) {
+    /* Delete the sub-screen before popping to avoid leaking it on the 48 KB heap. */
+    if (s_wifi_screen) { lv_obj_delete(s_wifi_screen); s_wifi_screen = nullptr; }
     screen_router::pop();
 }
 
@@ -179,18 +189,32 @@ static lv_obj_t* create_wifi_networks_screen() {
         }
     }
 
-    y += 10;
+    y += 14;
+    /* "Scan & Add Network" button — launches the on-screen WiFi setup flow */
+    lv_obj_t* scan_btn = lv_button_create(scr);
+    lv_obj_set_size(scan_btn, 240, 40);
+    lv_obj_set_style_bg_color(scan_btn, lv_color_hex(0x1a3a1a), 0);
+    lv_obj_set_style_bg_color(scan_btn, lv_color_hex(0x2a5a2a), LV_STATE_PRESSED);
+    lv_obj_set_style_radius(scan_btn, 8, 0);
+    lv_obj_set_style_border_width(scan_btn, 0, 0);
+    lv_obj_align(scan_btn, LV_ALIGN_TOP_MID, 0, y);
+    lv_obj_add_event_cb(scan_btn, [](lv_event_t* /*e*/) {
+        screen_router::push(wifi_setup::create_screen());
+    }, LV_EVENT_CLICKED, NULL);
+
+    lv_obj_t* scan_lbl = lv_label_create(scan_btn);
+    lv_label_set_text(scan_lbl, LV_SYMBOL_WIFI "  Scan & Add Network");
+    lv_obj_set_style_text_font(scan_lbl, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(scan_lbl, lv_color_hex(0xffffff), 0);
+    lv_obj_center(scan_lbl);
+
+    /* Serial hint retained below the button */
+    y += 50;
     lv_obj_t* hint = lv_label_create(scr);
     lv_label_set_text(hint,
-        "Use serial to manage WiFi:\n"
-        "  wifi add \"SSID\" \"password\"\n"
-        "  wifi list\n"
-        "  wifi prefer \"SSID\"\n"
-        "  wifi remove \"SSID\"\n"
-        "  wifi clear");
+        "Serial: wifi add/list/prefer/remove/clear");
     lv_obj_set_style_text_font(hint, &lv_font_montserrat_14, 0);
-    lv_obj_set_style_text_color(hint, lv_color_hex(0x888899), 0);
-    lv_obj_set_style_text_line_space(hint, 4, 0);
+    lv_obj_set_style_text_color(hint, lv_color_hex(0x666677), 0);
     lv_obj_align(hint, LV_ALIGN_TOP_LEFT, 15, y);
 
     s_wifi_screen = scr;
@@ -264,6 +288,54 @@ lv_obj_t* create_screen() {
     lv_obj_set_style_text_font(wifi_lbl, &lv_font_montserrat_14, 0);
     lv_obj_set_style_text_color(wifi_lbl, lv_color_hex(0xffffff), 0);
     lv_obj_center(wifi_lbl);
+
+    /* Network connectivity status label */
+    lv_obj_t* net_status_lbl = lv_label_create(scr);
+    lv_obj_set_style_text_font(net_status_lbl, &lv_font_montserrat_14, 0);
+
+#if __has_include("os/net_manager.h")
+    /* net_manager.h available — show rich mode + optional AP SSID */
+    {
+        char net_buf[64] = {0};
+        net_manager::Mode m = net_manager::mode();
+        switch (m) {
+            case net_manager::Mode::Boot:
+                snprintf(net_buf, sizeof(net_buf), "Net: Booting...");
+                break;
+            case net_manager::Mode::StaConnecting:
+                snprintf(net_buf, sizeof(net_buf), "Net: Connecting...");
+                break;
+            case net_manager::Mode::StaConnected:
+                snprintf(net_buf, sizeof(net_buf), "Net: Connected (STA)");
+                break;
+            case net_manager::Mode::ApPortal:
+                snprintf(net_buf, sizeof(net_buf), "Net: AP Portal  %s",
+                         net_manager::ap_ssid() ? net_manager::ap_ssid() : "");
+                break;
+            case net_manager::Mode::ApStaRetry:
+                snprintf(net_buf, sizeof(net_buf), "Net: AP+STA retry");
+                break;
+            default:
+                snprintf(net_buf, sizeof(net_buf), "Net: Unknown");
+                break;
+        }
+        lv_label_set_text(net_status_lbl, net_buf);
+        lv_obj_set_style_text_color(net_status_lbl,
+            (m == net_manager::Mode::StaConnected)
+                ? lv_color_hex(0x4ADE80)
+                : lv_color_hex(0x888899), 0);
+    }
+#else
+    /* Fallback: simple connected / not-connected from wifi_profiles */
+    lv_label_set_text(net_status_lbl,
+        wifi_profiles::is_connected() ? "Net: Connected" : "Net: Not connected");
+    lv_obj_set_style_text_color(net_status_lbl,
+        wifi_profiles::is_connected()
+            ? lv_color_hex(0x4ADE80)
+            : lv_color_hex(0x888899), 0);
+#endif
+
+    lv_obj_align(net_status_lbl, LV_ALIGN_TOP_MID, 0, 200);
 
     widgets::make_back_btn(scr, back_cb);
     return scr;

@@ -26,6 +26,7 @@
 #include <ArduinoJson.h>
 #include <Arduino.h>
 #include <time.h>
+#include <math.h>
 
 namespace claude_widget {
 
@@ -135,11 +136,12 @@ static void stamp_update_time() {
 /*
  * Anthropic GET /api/oauth/usage response shape (confirmed via server.js):
  * {
- *   "five_hour":  { "utilization": 0.65, "resets_at": "2026-05-28T12:30:00Z" },
- *   "seven_day":  { "utilization": 0.12, "resets_at": "2026-06-04T00:00:00Z" },
+ *   "five_hour":  { "utilization": 12, "resets_at": "2026-05-28T12:30:00Z" },
+ *   "seven_day":  { "utilization": 45, "resets_at": "2026-06-04T00:00:00Z" },
  *   ...
  * }
- * We map utilization (0..1 float) to 0..100 int for the bars.
+ * The utilization field is already an integer on a 0–100 percent scale (e.g. 12 means 12%).
+ * Use it directly for the bars without further multiplication.
  */
 static void apply_json(const char* json_str) {
     JsonDocument doc;
@@ -158,16 +160,42 @@ static void apply_json(const char* json_str) {
     /* five_hour */
     JsonObject fh = doc["five_hour"];
     if (!fh.isNull()) {
-        float util_frac = fh["utilization"] | 0.0f;
-        int pct5h = (int)(util_frac * 100.0f + 0.5f);
+        /* Bug 1 fix: utilization is a JSON float (e.g. 6.0); use float default
+         * so ArduinoJson 7 doesn't silently zero it with an int | 0 fallback. */
+        float util5h = fh["utilization"] | 0.0f;
+        int pct5h = (int)roundf(util5h);
         const char* resets_at_5h = fh["resets_at"] | nullptr;
         int32_t reset5h = 0;
         if (resets_at_5h) {
             struct tm t = {};
-            /* Parse ISO 8601 — only works if time is synced */
-            char* ok = strptime(resets_at_5h, "%Y-%m-%dT%H:%M:%SZ", &t);
-            if (ok) {
-                time_t target = mktime(&t);
+            /* Bug 2 fix: parse only the fixed 19-char prefix (YYYY-MM-DDTHH:MM:SS),
+             * then extract the numeric UTC offset (+HH:MM / -HH:MM) or Z.
+             * The live API returns fractional seconds + offset, e.g.
+             * "2026-05-29T17:50:00.053337-05:00" — strptime("%…Z") fails on these. */
+            char* p = strptime(resets_at_5h, "%Y-%m-%dT%H:%M:%S", &t);
+            if (p) {
+                /* Skip optional fractional seconds */
+                if (*p == '.') { ++p; while (*p >= '0' && *p <= '9') ++p; }
+                /* Parse timezone offset */
+                int tz_offset_secs = 0;
+                if (*p == 'Z' || *p == 'z') {
+                    tz_offset_secs = 0;
+                } else if (*p == '+' || *p == '-') {
+                    int sign = (*p == '+') ? 1 : -1;
+                    ++p;
+                    int hh = 0, mm = 0;
+                    sscanf(p, "%2d:%2d", &hh, &mm);
+                    tz_offset_secs = sign * (hh * 3600 + mm * 60);
+                }
+                /* Convert local time fields → UTC epoch.
+                 * timegm() treats tm as UTC; not always available on ESP32.
+                 * Portable alternative: mktime() (treats tm as local) then
+                 * subtract timezone. On ESP32 with NTP, TZ is UTC so they agree.
+                 * We subtract tz_offset_secs to convert API-local → UTC:
+                 *   utc_epoch = mktime_as_utc(t) - tz_offset_secs */
+                t.tm_isdst = 0;
+                time_t local_epoch = mktime(&t);          // treated as local (UTC on device)
+                time_t target = local_epoch - tz_offset_secs;
                 reset5h = (int32_t)(target - time(nullptr));
                 if (reset5h < 0) reset5h = 0;
             }
@@ -185,15 +213,30 @@ static void apply_json(const char* json_str) {
     /* seven_day */
     JsonObject sd = doc["seven_day"];
     if (!sd.isNull()) {
-        float util_frac = sd["utilization"] | 0.0f;
-        int pct7d = (int)(util_frac * 100.0f + 0.5f);
+        /* Bug 1 fix: same float-read pattern as five_hour above */
+        float util7d = sd["utilization"] | 0.0f;
+        int pct7d = (int)roundf(util7d);
         const char* resets_at_7d = sd["resets_at"] | nullptr;
         int32_t reset7d = 0;
         if (resets_at_7d) {
             struct tm t = {};
-            char* ok = strptime(resets_at_7d, "%Y-%m-%dT%H:%M:%SZ", &t);
-            if (ok) {
-                time_t target = mktime(&t);
+            /* Bug 2 fix: same robust ISO-8601 parse as five_hour above */
+            char* p = strptime(resets_at_7d, "%Y-%m-%dT%H:%M:%S", &t);
+            if (p) {
+                if (*p == '.') { ++p; while (*p >= '0' && *p <= '9') ++p; }
+                int tz_offset_secs = 0;
+                if (*p == 'Z' || *p == 'z') {
+                    tz_offset_secs = 0;
+                } else if (*p == '+' || *p == '-') {
+                    int sign = (*p == '+') ? 1 : -1;
+                    ++p;
+                    int hh = 0, mm = 0;
+                    sscanf(p, "%2d:%2d", &hh, &mm);
+                    tz_offset_secs = sign * (hh * 3600 + mm * 60);
+                }
+                t.tm_isdst = 0;
+                time_t local_epoch = mktime(&t);
+                time_t target = local_epoch - tz_offset_secs;
                 reset7d = (int32_t)(target - time(nullptr));
                 if (reset7d < 0) reset7d = 0;
             }
@@ -299,10 +342,19 @@ void poll_now() {
         return;
     }
 
-    /* Show expired badge if token is past expiry — but still attempt the call */
-    show_expired(is_expired);
+    /* If token is expired, attempt a proactive refresh before the API call */
     if (is_expired) {
-        LOG_W("claude_w", "poll_now: token is expired — attempting anyway (v1: no refresh)");
+        LOG_I("claude_w", "poll_now: token expired — attempting refresh");
+        set_status("Refreshing token...");
+        if (claude_auth::refresh_active()) {
+            LOG_I("claude_w", "poll_now: token refreshed successfully");
+            /* Re-read token after refresh */
+            token = claude_auth::get_active_access_token(&is_expired);
+            show_expired(false);
+        } else {
+            LOG_W("claude_w", "poll_now: refresh failed — attempting poll with stale token");
+            show_expired(true);
+        }
     }
 
     /* Log heap before HTTPS handshake */
@@ -334,11 +386,42 @@ void poll_now() {
     } else if (code == 401) {
         http.end();
         client.stop();
-        /* 401 = token expired/invalid. v1: show badge, no refresh. */
-        set_connected(false);
-        show_expired(true);
-        set_status("Token expired — use 'claude token set'");
-        LOG_W("claude_w", "poll_now: 401 Unauthorized — token expired");
+        /* 401 = token rejected. Attempt one refresh-and-retry cycle. */
+        LOG_W("claude_w", "poll_now: 401 — attempting token refresh");
+        set_status("Token rejected — refreshing...");
+        if (claude_auth::refresh_active()) {
+            /* Retry with refreshed token */
+            token = claude_auth::get_active_access_token(nullptr);
+            WiFiClientSecure client2;
+            client2.setInsecure();
+            HTTPClient http2;
+            http2.begin(client2, ANTHROPIC_USAGE_URL);
+            http2.setTimeout(10000);
+            http2.addHeader("Authorization", "Bearer " + token);
+            http2.addHeader("anthropic-beta", ANTHROPIC_BETA_HDR);
+            http2.addHeader("Content-Type", "application/json");
+            int code2 = http2.GET();
+            if (code2 == 200) {
+                String body2 = http2.getString();
+                http2.end();
+                client2.stop();
+                show_expired(false);
+                apply_json(body2.c_str());
+                LOG_I("claude_w", "poll_now: retry after refresh succeeded");
+            } else {
+                http2.end();
+                client2.stop();
+                set_connected(false);
+                show_expired(true);
+                set_status("Auth failed — reprovision tokens");
+                LOG_W("claude_w", "poll_now: retry after refresh failed: %d", code2);
+            }
+        } else {
+            set_connected(false);
+            show_expired(true);
+            set_status("Token expired — use 'claude token set'");
+            LOG_W("claude_w", "poll_now: refresh failed, showing expired badge");
+        }
     } else {
         String body = http.getString();
         http.end();

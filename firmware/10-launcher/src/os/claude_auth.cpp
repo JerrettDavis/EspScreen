@@ -14,6 +14,9 @@
 #include "logger.h"
 #include <Arduino.h>
 #include <time.h>
+#include <WiFiClientSecure.h>
+#include <HTTPClient.h>
+#include <ArduinoJson.h>
 
 namespace claude_auth {
 
@@ -246,6 +249,119 @@ bool is_token_expired() {
     bool expired = false;
     get_active_access_token(&expired);
     return expired;
+}
+
+bool refresh_active() {
+    uint8_t count = profile_count();
+    if (count == 0) {
+        LOG_W("claude_auth", "refresh_active: no profiles");
+        return false;
+    }
+    uint8_t idx = active_index();
+    if (idx >= count) {
+        LOG_W("claude_auth", "refresh_active: active index out of range");
+        return false;
+    }
+
+    char ns[8];
+    profile_ns(idx, ns, sizeof(ns));
+    String rt = nvs_store::get_str(ns, "refresh", "");
+    if (rt.isEmpty()) {
+        LOG_W("claude_auth", "refresh_active: no refresh token stored");
+        return false;
+    }
+
+    static const char* TOKEN_URL  = "https://platform.claude.com/v1/oauth/token";
+    static const char* CLIENT_ID  = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
+    static const char* SCOPE      = "user:profile user:inference user:sessions:claude_code user:mcp_servers";
+
+    /* Build JSON body */
+    JsonDocument req;
+    req["grant_type"]    = "refresh_token";
+    req["refresh_token"] = rt;
+    req["client_id"]     = CLIENT_ID;
+    req["scope"]         = SCOPE;
+    String body;
+    serializeJson(req, body);
+
+    LOG_I("claude_auth", "refresh_active: POST %s", TOKEN_URL);
+
+    WiFiClientSecure client;
+    client.setInsecure();  // TODO: pin Anthropic CA
+    HTTPClient http;
+    http.begin(client, TOKEN_URL);
+    http.setTimeout(10000);
+    http.addHeader("Content-Type", "application/json");
+
+    int code = http.POST(body);
+
+    if (code != 200) {
+        String errBody = http.getString();
+        http.end();
+        client.stop();
+        LOG_W("claude_auth", "refresh_active: HTTP %d  body=%s",
+              code, errBody.substring(0, 80).c_str());
+        return false;
+    }
+
+    String resp = http.getString();
+    http.end();
+    client.stop();
+
+    JsonDocument res;
+    DeserializationError err = deserializeJson(res, resp);
+    if (err) {
+        LOG_W("claude_auth", "refresh_active: JSON parse error: %s", err.c_str());
+        return false;
+    }
+
+    const char* new_access  = res["access_token"]  | (const char*)nullptr;
+    const char* new_refresh = res["refresh_token"] | (const char*)nullptr;
+    int64_t     expires_in  = res["expires_in"]    | (int64_t)0;
+
+    if (!new_access || strlen(new_access) < 10) {
+        LOG_W("claude_auth", "refresh_active: response missing access_token");
+        return false;
+    }
+
+    /* If refresh token is not rotated, keep the old one */
+    const char* rt_to_store = (new_refresh && strlen(new_refresh) > 10)
+                              ? new_refresh
+                              : rt.c_str();
+
+    /* expires_in is in seconds; convert to absolute Unix ms */
+    int64_t expires_ms = 0;
+    if (expires_in > 0) {
+        time_t now = time(nullptr);
+        if (now > 1000000) {
+            expires_ms = ((int64_t)now + expires_in) * 1000LL;
+        } else {
+            /* No wall clock — estimate from millis() */
+            expires_ms = (int64_t)millis() + expires_in * 1000LL;
+        }
+    }
+
+    nvs_store::put_str(ns, "access", new_access);
+    nvs_store::put_str(ns, "refresh", rt_to_store);
+    if (expires_ms > 0) {
+        put_i64(ns, "exphi", "explo", expires_ms);
+    }
+
+    LOG_I("claude_auth", "refresh_active: OK — new token expires_in=%lld s",
+          (long long)expires_in);
+    return true;
+}
+
+bool set_tokens_by_label(const char* label,
+                          const char* access,
+                          const char* refresh_tok,
+                          int64_t     expires_unix) {
+    uint8_t idx = find_by_label(label);
+    if (idx == 255) {
+        LOG_W("claude_auth", "set_tokens_by_label: label '%s' not found", label);
+        return false;
+    }
+    return set_tokens(idx, access, refresh_tok, expires_unix);
 }
 
 } // namespace claude_auth

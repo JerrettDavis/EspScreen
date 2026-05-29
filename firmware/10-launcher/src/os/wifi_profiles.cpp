@@ -10,6 +10,7 @@
 #include <WiFi.h>
 #include <Arduino.h>
 #include <time.h>
+#include <lvgl.h>
 
 namespace wifi_profiles {
 
@@ -87,7 +88,8 @@ static bool try_connect(const char* ssid, const char* pass, uint32_t timeout_ms)
     WiFi.begin(ssid, pass);
     uint32_t start = millis();
     while (WiFi.status() != WL_CONNECTED && (millis() - start) < timeout_ms) {
-        delay(200);
+        delay(50);
+        lv_timer_handler();   // keep UI responsive and WDT fed during connect
         Serial.print(".");
     }
     Serial.println();
@@ -278,6 +280,85 @@ void clear_all() {
     nvs_store::put_u8(NS_GLOBAL, KEY_COUNT, 0);
     WiFi.disconnect(true);
     LOG_I("wifi", "clear_all: all networks wiped, WiFi disconnected");
+}
+
+/* ── Scan & on-demand connect (appended for wifi_setup flow) ─────────── */
+
+uint8_t scan(ScanResult* out, uint8_t max) {
+    if (!out || max == 0) return 0;
+
+    LOG_I("wifi", "scan: starting synchronous scan (STA link may drop ~2-4s)");
+
+    int n = WiFi.scanNetworks(/*async=*/false, /*show_hidden=*/false);
+    if (n <= 0) {
+        LOG_W("wifi", "scan: no networks found (result=%d)", n);
+        WiFi.scanDelete();
+        return 0;
+    }
+
+    LOG_I("wifi", "scan: raw result count=%d", n);
+
+    /* Deduplicate: keep strongest RSSI per SSID.
+     * The overflow guard (written < max) is intentionally separate from the
+     * dedup search so tail entries can still upgrade the RSSI of an already-
+     * written slot even after the output buffer is full. */
+    uint8_t written = 0;
+    for (int i = 0; i < n; i++) {
+        String ssid_str = WiFi.SSID(i);
+        if (ssid_str.isEmpty()) continue;
+
+        int8_t rssi  = (int8_t)WiFi.RSSI(i);
+        uint8_t enc  = (WiFi.encryptionType(i) == WIFI_AUTH_OPEN) ? 0 : 1;
+
+        /* Search already-written entries for the same SSID */
+        bool found = false;
+        for (uint8_t j = 0; j < written; j++) {
+            if (strncasecmp(out[j].ssid, ssid_str.c_str(), 32) == 0) {
+                /* Update stored entry if this reading is stronger */
+                if (rssi > out[j].rssi) {
+                    out[j].rssi = rssi;
+                    out[j].enc  = enc;
+                }
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            /* New SSID — add only if there is room in the output buffer */
+            if (written < max) {
+                strlcpy(out[written].ssid, ssid_str.c_str(), sizeof(out[written].ssid));
+                out[written].rssi = rssi;
+                out[written].enc  = enc;
+                written++;
+            }
+        }
+    }
+
+    WiFi.scanDelete();
+    LOG_I("wifi", "scan: returning %u unique SSIDs (capped at %u)", written, max);
+    return written;
+}
+
+bool connect_now(const char* ssid, const char* pass, uint32_t timeout_ms) {
+    if (!ssid || ssid[0] == '\0') {
+        LOG_W("wifi", "connect_now: empty SSID");
+        return false;
+    }
+    /* pass == nullptr is treated as empty (open network) */
+    const char* pw = (pass && pass[0] != '\0') ? pass : "";
+
+    LOG_I("wifi", "connect_now: attempting '%s' timeout=%lums", ssid, (unsigned long)timeout_ms);
+
+    if (try_connect(ssid, pw, timeout_ms)) {
+        LOG_I("wifi", "connect_now: connected  IP=%s  RSSI=%d dBm",
+              WiFi.localIP().toString().c_str(), (int)WiFi.RSSI());
+        add_network(ssid, pw);   // persist credentials (creates or updates)
+        start_ntp();             // trigger NTP (same as init() path)
+        return true;
+    }
+
+    LOG_W("wifi", "connect_now: failed to connect to '%s'", ssid);
+    return false;
 }
 
 } // namespace wifi_profiles
