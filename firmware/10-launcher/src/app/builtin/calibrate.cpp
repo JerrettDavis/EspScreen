@@ -445,24 +445,25 @@ static void fail_and_retry(const char* reason, int failed_corner) {
     if (s_timer) { lv_timer_delete(s_timer); s_timer = nullptr; }
 
     /* Collect whatever corner data we have for the diagnostic line */
-    int32_t x_min = 0, x_max = 0, y_min = 0, y_max = 0;
+    int32_t x_at_left = 0, x_at_right = 0, y_at_top = 0, y_at_bottom = 0;
     if (failed_corner >= 4) {
-        /* We had all corners — compute the same values as finish_calibration */
-        x_min = (s_corner_x[0] + s_corner_x[3]) / 2;
-        x_max = (s_corner_x[1] + s_corner_x[2]) / 2;
-        y_min = (s_corner_y[0] + s_corner_y[1]) / 2;
-        y_max = (s_corner_y[3] + s_corner_y[2]) / 2;
+        /* We had all corners — show the raw-X affine (pre-swap, for reference) */
+        x_at_left   = (s_corner_x[0] + s_corner_x[3]) / 2;
+        x_at_right  = (s_corner_x[1] + s_corner_x[2]) / 2;
+        y_at_top    = (s_corner_y[0] + s_corner_y[1]) / 2;
+        y_at_bottom = (s_corner_y[3] + s_corner_y[2]) / 2;
     }
 
     Serial.printf("[cal] FAILURE corner=%d reason=\"%s\" "
                   "raw_tl=(%ld,%ld) raw_tr=(%ld,%ld) raw_br=(%ld,%ld) raw_bl=(%ld,%ld) "
-                  "computed_x_min=%ld computed_x_max=%ld computed_y_min=%ld computed_y_max=%ld\n",
+                  "naive_x[%ld->%ld] naive_y[%ld->%ld]\n",
                   failed_corner, reason,
                   (long)s_corner_x[0], (long)s_corner_y[0],
                   (long)s_corner_x[1], (long)s_corner_y[1],
                   (long)s_corner_x[2], (long)s_corner_y[2],
                   (long)s_corner_x[3], (long)s_corner_y[3],
-                  (long)x_min, (long)x_max, (long)y_min, (long)y_max);
+                  (long)x_at_left, (long)x_at_right,
+                  (long)y_at_top,  (long)y_at_bottom);
     LOG_W("cal", "FAILURE: %s — restarting from corner 0", reason);
     Serial.printf("[cal] FAILURE: %s — restarting from corner 0\n", reason);
 
@@ -522,96 +523,127 @@ static void finish_calibration() {
     s_cal_running = false;
     if (s_timer) { lv_timer_delete(s_timer); s_timer = nullptr; }
 
-    /* Dump all raw corner values */
-    Serial.printf("[cal] TL=(%ld,%ld) TR=(%ld,%ld) BR=(%ld,%ld) BL=(%ld,%ld)\n",
+    /* ── Diagnostic: dump all 4 corner raw values ── */
+    Serial.printf("[cal] CORNERS raw_tl=(%ld,%ld) raw_tr=(%ld,%ld) raw_br=(%ld,%ld) raw_bl=(%ld,%ld)\n",
                   (long)s_corner_x[0], (long)s_corner_y[0],
                   (long)s_corner_x[1], (long)s_corner_y[1],
                   (long)s_corner_x[2], (long)s_corner_y[2],
                   (long)s_corner_x[3], (long)s_corner_y[3]);
 
-    /* Orientation sanity: TL.x should be < TR.x, TL.y should be < BL.y */
-    Serial.printf("[cal] orient check: TL.x=%ld TR.x=%ld (expect TL<TR); TL.y=%ld BL.y=%ld (expect TL<BL)\n",
-                  (long)s_corner_x[0], (long)s_corner_x[1],
-                  (long)s_corner_y[0], (long)s_corner_y[3]);
-    if (s_corner_x[0] > s_corner_x[1]) {
-        Serial.println("[cal] WARN: X axis appears FLIPPED — TL.x > TR.x");
+    /* ── Axis detection ──────────────────────────────────────────────
+     * Compute how much each raw channel moves horizontally (left→right)
+     * and vertically (top→bottom).  Whichever raw channel has the larger
+     * horizontal spread is the one that physically runs left-right — that
+     * is the correct source for screen-X.
+     *
+     * Corners: 0=TL, 1=TR, 2=BR, 3=BL
+     */
+    int32_t dx_horiz = abs( ((s_corner_x[1] + s_corner_x[2]) / 2) -
+                             ((s_corner_x[0] + s_corner_x[3]) / 2) );  /* raw_x spread L→R */
+    int32_t dy_horiz = abs( ((s_corner_y[1] + s_corner_y[2]) / 2) -
+                             ((s_corner_y[0] + s_corner_y[3]) / 2) );  /* raw_y spread L→R */
+    int32_t dx_vert  = abs( ((s_corner_x[3] + s_corner_x[2]) / 2) -
+                             ((s_corner_x[0] + s_corner_x[1]) / 2) );  /* raw_x spread T→B */
+    int32_t dy_vert  = abs( ((s_corner_y[3] + s_corner_y[2]) / 2) -
+                             ((s_corner_y[0] + s_corner_y[1]) / 2) );  /* raw_y spread T→B */
+
+    /* axis_swap = true when raw_y varies more horizontally than raw_x does,
+     * AND raw_x varies more vertically than raw_y — classic 90° mount. */
+    bool axis_swap = (dy_horiz > dx_horiz) && (dx_vert > dy_vert);
+
+    Serial.printf("[cal] AXIS_DETECT dx_horiz=%ld dy_horiz=%ld dx_vert=%ld dy_vert=%ld swap=%s\n",
+                  (long)dx_horiz, (long)dy_horiz, (long)dx_vert, (long)dy_vert,
+                  axis_swap ? "YES" : "NO");
+    LOG_I("cal", "Axis detection: dx_horiz=%ld dy_horiz=%ld dx_vert=%ld dy_vert=%ld swap=%s",
+          (long)dx_horiz, (long)dy_horiz, (long)dx_vert, (long)dy_vert,
+          axis_swap ? "YES" : "NO");
+
+    /* ── Build signed-delta affine endpoints ──────────────────────────
+     * x_at_left  = mean of the "x-axis source" values at left-edge corners (TL, BL)
+     * x_at_right = mean at right-edge corners (TR, BR)
+     * y_at_top   = mean at top-edge corners (TL, TR)
+     * y_at_bottom= mean at bottom-edge corners (BL, BR)
+     *
+     * With axis_swap, raw_y is the X source and raw_x is the Y source.
+     * We do NOT enforce min<max — signed deltas handle inverted panels.
+     */
+    int32_t x_at_left, x_at_right, y_at_top, y_at_bottom;
+    if (!axis_swap) {
+        /* Normal orientation: raw_x runs horizontally, raw_y vertically */
+        x_at_left   = (s_corner_x[0] + s_corner_x[3]) / 2;  /* TL.rx + BL.rx */
+        x_at_right  = (s_corner_x[1] + s_corner_x[2]) / 2;  /* TR.rx + BR.rx */
+        y_at_top    = (s_corner_y[0] + s_corner_y[1]) / 2;  /* TL.ry + TR.ry */
+        y_at_bottom = (s_corner_y[3] + s_corner_y[2]) / 2;  /* BL.ry + BR.ry */
+    } else {
+        /* Swapped: raw_y runs horizontally, raw_x runs vertically */
+        x_at_left   = (s_corner_y[0] + s_corner_y[3]) / 2;  /* TL.ry + BL.ry */
+        x_at_right  = (s_corner_y[1] + s_corner_y[2]) / 2;  /* TR.ry + BR.ry */
+        y_at_top    = (s_corner_x[0] + s_corner_x[1]) / 2;  /* TL.rx + TR.rx */
+        y_at_bottom = (s_corner_x[3] + s_corner_x[2]) / 2;  /* BL.rx + BR.rx */
     }
-    if (s_corner_y[0] > s_corner_y[3]) {
-        Serial.println("[cal] WARN: Y axis appears FLIPPED — TL.y > BL.y");
-    }
 
-    /* Compute affine bounds from 4 corners */
-    int32_t x_min = (s_corner_x[0] + s_corner_x[3]) / 2;   /* TL.x + BL.x */
-    int32_t x_max = (s_corner_x[1] + s_corner_x[2]) / 2;   /* TR.x + BR.x */
-    int32_t y_min = (s_corner_y[0] + s_corner_y[1]) / 2;   /* TL.y + TR.y */
-    int32_t y_max = (s_corner_y[3] + s_corner_y[2]) / 2;   /* BL.y + BR.y */
+    Serial.printf("[cal] AFFINE x_at_left=%ld x_at_right=%ld y_at_top=%ld y_at_bottom=%ld\n",
+                  (long)x_at_left, (long)x_at_right,
+                  (long)y_at_top,  (long)y_at_bottom);
+    LOG_I("cal", "Affine: x[%ld->%ld] y[%ld->%ld] (signed deltas; negative = inverted axis)",
+          (long)x_at_left, (long)x_at_right, (long)y_at_top, (long)y_at_bottom);
 
-    Serial.printf("[cal] cal_x_min=%ld cal_x_max=%ld cal_y_min=%ld cal_y_max=%ld\n",
-                  (long)x_min, (long)x_max, (long)y_min, (long)y_max);
-    LOG_I("cal", "Computed cal: x[%ld..%ld] y[%ld..%ld]",
-          (long)x_min, (long)x_max, (long)y_min, (long)y_max);
-
-    /* Sanity check 1: min < max */
-    if (x_min >= x_max || y_min >= y_max) {
-        Serial.printf("[cal] REJECT: x_min(%ld) >= x_max(%ld) or y_min(%ld) >= y_max(%ld)\n",
-                      (long)x_min, (long)x_max, (long)y_min, (long)y_max);
-        char reason[96];
+    /* ── Sanity check: spread must be at least 500 counts per axis ── */
+    int32_t x_spread = abs(x_at_right - x_at_left);
+    int32_t y_spread = abs(y_at_bottom - y_at_top);
+    if (x_spread < 500 || y_spread < 500) {
+        Serial.printf("[cal] REJECT: spread too small — x_spread=%ld y_spread=%ld (need >=500 each)\n",
+                      (long)x_spread, (long)y_spread);
+        char reason[120];
         snprintf(reason, sizeof(reason),
-                 "Bad values: x range too small (min=%ld max=%ld)",
-                 (long)x_min, (long)x_max);
+                 "Bad values: x_spread=%ld y_spread=%ld (need >=500)",
+                 (long)x_spread, (long)y_spread);
         fail_and_retry(reason, 4);
         return;
     }
 
-    /* Sanity check 2: range must be at least 500 ADC counts per axis */
-    int32_t x_range = x_max - x_min;
-    int32_t y_range = y_max - y_min;
-    if (x_range < 500 || y_range < 500) {
-        Serial.printf("[cal] REJECT: range too small — x_range=%ld y_range=%ld (need >=500 each)\n",
-                      (long)x_range, (long)y_range);
-        char reason[96];
-        snprintf(reason, sizeof(reason),
-                 "Bad values: x range too small (min=%ld max=%ld)",
-                 (long)x_min, (long)x_max);
-        fail_and_retry(reason, 4);
-        return;
-    }
-
-    /* Sanity check 3: stuck ADC (exactly 0 or 4095) */
-    if (x_min == 0 || x_max == 4095 || y_min == 0 || y_max == 4095) {
-        Serial.printf("[cal] REJECT: stuck ADC value (0 or 4095) in x[%ld..%ld] y[%ld..%ld]\n",
-                      (long)x_min, (long)x_max, (long)y_min, (long)y_max);
+    /* ── Sanity check: stuck ADC ─────────────────────────────────── */
+    if (x_at_left == 0 || x_at_right == 4095 ||
+        y_at_top  == 0 || y_at_bottom == 4095 ||
+        x_at_right == 0 || x_at_left == 4095 ||
+        y_at_bottom == 0 || y_at_top == 4095) {
+        Serial.printf("[cal] REJECT: stuck ADC value (0 or 4095) in affine endpoints\n");
         fail_and_retry("Bad values: stuck ADC at 0 or 4095", 4);
         return;
     }
 
-    /* NOTE: Removed the old 100..4000 outer-bound check — some panels read outside that range */
     Serial.println("[cal] SAVE: ok — all sanity checks passed");
 
-    /* Save to NVS — nvs_store API is void; verify by reading back */
-    nvs_store::put_i32("touch", "cal_x_min", x_min);
-    nvs_store::put_i32("touch", "cal_x_max", x_max);
-    nvs_store::put_i32("touch", "cal_y_min", y_min);
-    nvs_store::put_i32("touch", "cal_y_max", y_max);
+    /* ── Save to NVS ─────────────────────────────────────────────── */
+    /* cal_x_min / cal_x_max reinterpreted as x_at_left / x_at_right.
+     * cal_y_min / cal_y_max reinterpreted as y_at_top / y_at_bottom.
+     * axis_swap stored as a new u8 key. NVS schema is otherwise unchanged. */
+    nvs_store::put_i32("touch", "cal_x_min",  x_at_left);
+    nvs_store::put_i32("touch", "cal_x_max",  x_at_right);
+    nvs_store::put_i32("touch", "cal_y_min",  y_at_top);
+    nvs_store::put_i32("touch", "cal_y_max",  y_at_bottom);
+    nvs_store::put_u8 ("touch", "axis_swap",  axis_swap ? 1 : 0);
     nvs_store::put_u8 ("touch", "calibrated", 1);
 
-    /* Readback verify */
-    int32_t rb_xmin = nvs_store::get_i32("touch", "cal_x_min", -1);
-    int32_t rb_xmax = nvs_store::get_i32("touch", "cal_x_max", -1);
-    if (rb_xmin != x_min || rb_xmax != x_max) {
-        Serial.printf("[cal] REJECT: NVS readback mismatch (wrote x[%ld..%ld] read x[%ld..%ld])\n",
-                      (long)x_min, (long)x_max, (long)rb_xmin, (long)rb_xmax);
+    /* Readback verify (x values only — sufficient to detect NVS write failure) */
+    int32_t rb_xl = nvs_store::get_i32("touch", "cal_x_min", -1);
+    int32_t rb_xr = nvs_store::get_i32("touch", "cal_x_max", -1);
+    if (rb_xl != x_at_left || rb_xr != x_at_right) {
+        Serial.printf("[cal] REJECT: NVS readback mismatch (wrote x[%ld->%ld] read x[%ld->%ld])\n",
+                      (long)x_at_left, (long)x_at_right, (long)rb_xl, (long)rb_xr);
         fail_and_retry("NVS save failed", 4);
         return;
     }
     Serial.println("[cal] NVS write ok");
 
     /* Hot-apply immediately */
-    touch::apply_cal(x_min, x_max, y_min, y_max);
+    touch::apply_cal(x_at_left, x_at_right, y_at_top, y_at_bottom, axis_swap);
 
     LOG_I("cal", "Calibration saved and applied");
-    Serial.printf("[cal] New cal: x[%ld..%ld] y[%ld..%ld]\n",
-                  (long)x_min, (long)x_max, (long)y_min, (long)y_max);
+    Serial.printf("[cal] New cal: swap=%s x[%ld->%ld] y[%ld->%ld]\n",
+                  axis_swap ? "YES" : "NO",
+                  (long)x_at_left, (long)x_at_right,
+                  (long)y_at_top,  (long)y_at_bottom);
 
     /* Show success message */
     lv_obj_clean(s_scr);
