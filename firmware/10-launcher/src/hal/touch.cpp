@@ -313,6 +313,13 @@ void init() {
         Serial.println("[touch] No cal in NVS. Type 'cal' to calibrate, or any tap will use Phase 0 defaults.");
     }
 
+    /* Startup diagnostic — visible in serial monitor at every boot */
+    Serial.printf("[touch] init complete: cal x_at_left=%ld x_at_right=%ld y_at_top=%ld y_at_bottom=%ld axis_swap=%d validated=%s\n",
+                  (long)s_x_at_left, (long)s_x_at_right,
+                  (long)s_y_at_top,  (long)s_y_at_bottom,
+                  (int)s_axis_swap,
+                  cal_values_valid(s_x_at_left, s_x_at_right, s_y_at_top, s_y_at_bottom) ? "YES" : "NO");
+
     /* Register LVGL input device */
     lv_indev_t* indev = lv_indev_create();
     lv_indev_set_type(indev, LV_INDEV_TYPE_POINTER);
