@@ -21,6 +21,7 @@ const { values: args, positionals } = parseArgs({
     'wifi-ssid': { type: 'string' },
     'wifi-pass': { type: 'string' },
     'list-ports':{ type: 'boolean', default: false },
+    reset:       { type: 'boolean', default: false },
     help:        { type: 'boolean', default: false, short: 'h' },
   },
   allowPositionals: true,
@@ -40,6 +41,8 @@ Options:
   --wifi-ssid <ssid>     WiFi SSID to provision (requires --wifi-pass)
   --wifi-pass <pass>     WiFi password
   --list-ports           Enumerate serial ports and exit
+  --reset                Power-cycle the board via DTR/RTS before provisioning
+                         (useful when board is in a crashed/wedged state)
   -h, --help             Show this help
 
 Examples:
@@ -48,6 +51,7 @@ Examples:
   node provision.js --label "Work Account"
   node provision.js --label "Work" --wifi-ssid "OfficeNet" --wifi-pass "secret123"
   node provision.js --list-ports
+  node provision.js --reset
 `);
   process.exit(0);
 }
@@ -141,11 +145,38 @@ function openPort(path) {
       dataBits: 8,
       parity:   'none',
       stopBits: 1,
-      // Do NOT toggle DTR/RTS — would reset the board
-      // Note: serialport v13 manages these via autoOpen
+      // Do NOT toggle DTR/RTS on open — would reset the board unintentionally.
+      // Use --reset flag if an explicit power-cycle is desired.
     });
     port.on('open', () => resolve(port));
     port.on('error', reject);
+  });
+}
+
+/**
+ * Power-cycle the ESP32 via DTR/RTS signals, mimicking the esptool reset sequence.
+ *   1. DTR=false, RTS=true  → hold EN (reset) low for 100ms
+ *   2. DTR=false, RTS=false → release EN; board boots
+ *   3. Wait 600ms for the firmware to reach the serial CLI prompt
+ *
+ * Only called when --reset is passed. Default provisioning does NOT reset.
+ */
+function resetBoard(port) {
+  return new Promise((resolve, reject) => {
+    console.log('  --reset: toggling DTR/RTS to power-cycle board...');
+    // Step 1: Assert reset (RTS=true → EN pulled low on most ESP32 dev kits)
+    port.set({ dtr: false, rts: true }, (err) => {
+      if (err) { reject(err); return; }
+      setTimeout(() => {
+        // Step 2: Release reset
+        port.set({ dtr: false, rts: false }, (err2) => {
+          if (err2) { reject(err2); return; }
+          console.log('  --reset: board released, waiting 600ms for boot...');
+          // Step 3: Wait for firmware to boot and reach CLI prompt
+          setTimeout(resolve, 600);
+        });
+      }, 100);
+    });
   });
 }
 
@@ -241,6 +272,16 @@ async function main() {
   STATUS.port = portLabel;
 
   const parser = port.pipe(new ReadlineParser({ delimiter: '\n' }));
+
+  // ── 3b. Optional board reset via DTR/RTS ─────────────────────────────
+  if (args.reset) {
+    try {
+      await resetBoard(port);
+      console.log('  Board reset complete.');
+    } catch (err) {
+      console.warn(`  Warning: --reset failed (${err.message}). Continuing anyway.`);
+    }
+  }
 
   // ── 4. Settle + wake ─────────────────────────────────────────────────
   // Send a blank line to flush any partial command in the board's buffer,

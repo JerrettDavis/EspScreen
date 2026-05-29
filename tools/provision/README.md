@@ -51,6 +51,18 @@ node provision.js --list-ports
 # or: npm run list
 ```
 
+### Reset a crashed/wedged board before provisioning
+
+```sh
+node provision.js --reset
+```
+
+Toggles DTR/RTS to power-cycle the board via its EN pin before sending any commands. Equivalent to pressing the reset button. Safe to combine with other flags:
+
+```sh
+node provision.js --reset --port COM20 --label "Work Account"
+```
+
 ### Refresh tokens (after re-login on host)
 
 ```sh
@@ -69,6 +81,7 @@ Idempotent — detects existing profile and updates tokens without creating a du
 | `--wifi-ssid <ssid>` | — | WiFi SSID (requires --wifi-pass) |
 | `--wifi-pass <pass>` | — | WiFi password |
 | `--list-ports` | — | Enumerate serial ports and exit |
+| `--reset` | off | Power-cycle board via DTR/RTS before provisioning |
 | `-h`, `--help` | — | Show help |
 
 ## Port Auto-Detection
