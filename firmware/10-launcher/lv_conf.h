@@ -7,7 +7,7 @@
  * Key changes vs template defaults:
  *   - LV_COLOR_DEPTH 16 (RGB565, matches ST7796)
  *   - LV_MEM_SIZE 48 KB (monitor with esp_get_free_heap_size; reduce to 32 KB if needed)
- *   - LV_USE_TFT_ESPI 1 (enables lv_tft_espi_create() API)
+ *   - LV_USE_TFT_ESPI 0 (display.cpp owns TFT_eSPI directly via custom flush_cb)
  *   - LV_FONT_MONTSERRAT_14 + 20 enabled; set as default
  *   - Disabled widgets: ARC, CHART, TABLE, CALENDAR, SPINBOX, SPAN, METER (save flash)
  */
@@ -22,7 +22,7 @@
 #define LV_MEM_SIZE             (48U * 1024U)  /* 48 KB LVGL heap */
 
 /* ── Display driver ─────────────────────────────────────────────────── */
-#define LV_USE_TFT_ESPI         1   /* enables lv_tft_espi_create() */
+#define LV_USE_TFT_ESPI         0   /* display.cpp owns TFT_eSPI; custom flush_cb */
 
 /* ── Refresh ─────────────────────────────────────────────────────────  */
 #define LV_DEF_REFR_PERIOD      16  /* ~60 fps target (ms) */

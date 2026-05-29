@@ -1,4 +1,5 @@
 #include "touch.h"
+#include "display.h"
 #include "../os/nvs_store.h"
 #include "../os/logger.h"
 #include <TFT_eSPI.h>
@@ -14,9 +15,18 @@
  *
  * NVS namespace: "touch"
  * Keys: cal_x_min, cal_x_max, cal_y_min, cal_y_max (i32), calibrated (u8)
+ *
+ * Goal 1 — no-cal-required default:
+ *   Boot goes directly to the launcher using Phase 0 hardcoded values.
+ *   Calibration is only run on explicit user request (Settings → Recalibrate).
+ *   NVS values are validated; corrupt values fall back to hardcoded defaults.
+ *
+ * Goal 3 — single TFT_eSPI instance:
+ *   Uses display::get_tft() instead of a local s_tft to eliminate the
+ *   dual-SPI-instance problem flagged in the Phase 1 architecture review.
  */
 
-/* ── Defaults from PHASE1.md §6 ─────────────────────────────────── */
+/* ── Phase 0 hardcoded defaults (Setup77 values, proven to work) ─── */
 static const int32_t kDefaultXMin = 275;
 static const int32_t kDefaultXMax = 3620;
 static const int32_t kDefaultYMin = 264;
@@ -25,20 +35,23 @@ static const int32_t kDefaultYMax = 3532;
 /* ── Calibration state ───────────────────────────────────────────── */
 static int32_t s_x_min, s_x_max, s_y_min, s_y_max;
 
-/* Shared TFT instance for getTouch() — same SPI bus as display.
- * NOTE: lv_tft_espi_create() (called in display::init) already called
- * tft.begin() on its internal TFT_eSPI instance.  We must NOT call
- * s_tft.begin() a second time because that re-initialises the ST7796
- * controller over SPI and leaves the bus in an inconsistent state.
- * Instead we skip begin() and use s_tft solely for getTouch() / SPI
- * touch reads, which share the same hardware SPI peripheral.
+/**
+ * Validate a set of calibration values.
+ * Returns false if any value is out of range or the set is clearly degenerate.
  */
-static TFT_eSPI s_tft;
+static bool cal_values_valid(int32_t xmin, int32_t xmax, int32_t ymin, int32_t ymax) {
+    if (xmin < 0 || xmax > 4095 || ymin < 0 || ymax > 4095) return false;
+    if (xmin >= xmax || ymin >= ymax) return false;
+    /* All four identical → almost certainly unwritten garbage */
+    if (xmin == xmax && xmax == ymin && ymin == ymax) return false;
+    return true;
+}
 
 /* ── LVGL indev read callback ────────────────────────────────────── */
 static void touch_read_cb(lv_indev_t* indev, lv_indev_data_t* data) {
+    TFT_eSPI* tft = display::get_tft();
     uint16_t raw_x = 0, raw_y = 0;
-    bool touched = s_tft.getTouch(&raw_x, &raw_y);
+    bool touched = tft->getTouch(&raw_x, &raw_y);
 
     if (touched) {
         /* Affine map raw ADC → screen pixels */
@@ -64,12 +77,10 @@ static void touch_read_cb(lv_indev_t* indev, lv_indev_data_t* data) {
 /**
  * Collect N raw samples for a given corner.
  * Discards min + max, averages the remaining 3.
- * @param n        Number of samples (5 recommended)
- * @param out_x    Averaged X
- * @param out_y    Averaged Y
  */
 static void collect_corner(const char* prompt_text, int n, int32_t* out_x, int32_t* out_y) {
-    /* Create a full-screen black overlay with prompt */
+    TFT_eSPI* tft = display::get_tft();
+
     lv_obj_t* overlay = lv_obj_create(lv_scr_act());
     lv_obj_set_size(overlay, LV_HOR_RES, LV_VER_RES);
     lv_obj_set_style_bg_color(overlay, lv_color_hex(0x000000), 0);
@@ -82,15 +93,14 @@ static void collect_corner(const char* prompt_text, int n, int32_t* out_x, int32
     lv_obj_set_style_text_color(lbl, lv_color_hex(0xffffff), 0);
     lv_obj_center(lbl);
 
-    lv_refr_now(NULL);  // force render before blocking
+    lv_refr_now(NULL);
 
-    /* Wait for touch down */
     uint16_t rx[5], ry[5];
     int collected = 0;
 
     while (collected < n) {
         uint16_t tx, ty;
-        if (s_tft.getTouch(&tx, &ty)) {
+        if (tft->getTouch(&tx, &ty)) {
             if (collected < 5) {
                 rx[collected] = tx;
                 ry[collected] = ty;
@@ -102,14 +112,10 @@ static void collect_corner(const char* prompt_text, int n, int32_t* out_x, int32
         lv_timer_handler();
     }
 
-    /* Wait for release — must pass valid pointers; getTouch writes to *x/*y */
     uint16_t rx_tmp, ry_tmp;
-    while (s_tft.getTouch(&rx_tmp, &ry_tmp)) {
-        delay(20);
-    }
+    while (tft->getTouch(&rx_tmp, &ry_tmp)) { delay(20); }
     delay(200);
 
-    /* Discard min + max, average survivors */
     int32_t sx = 0, sy = 0;
     int32_t mn_x = rx[0], mx_x = rx[0];
     int32_t mn_y = ry[0], mx_y = ry[0];
@@ -127,7 +133,6 @@ static void collect_corner(const char* prompt_text, int n, int32_t* out_x, int32
         *out_x = sx / used;
         *out_y = sy / used;
     } else {
-        /* Fallback: plain average */
         sx = sy = 0;
         for (int i = 0; i < n; i++) { sx += rx[i]; sy += ry[i]; }
         *out_x = sx / n;
@@ -138,25 +143,24 @@ static void collect_corner(const char* prompt_text, int n, int32_t* out_x, int32
 }
 
 void touch::run_calibration() {
+    TFT_eSPI* tft = display::get_tft();
     LOG_I("touch", "Starting 4-corner calibration");
 
-    int32_t tl_x, tl_y;  /* top-left */
-    int32_t tr_x, tr_y;  /* top-right */
-    int32_t bl_x, bl_y;  /* bottom-left */
-    int32_t br_x, br_y;  /* bottom-right */
+    int32_t tl_x, tl_y;
+    int32_t tr_x, tr_y;
+    int32_t bl_x, bl_y;
+    int32_t br_x, br_y;
 
     collect_corner("Tap TOP-LEFT corner",     5, &tl_x, &tl_y);
     collect_corner("Tap TOP-RIGHT corner",    5, &tr_x, &tr_y);
     collect_corner("Tap BOTTOM-LEFT corner",  5, &bl_x, &bl_y);
     collect_corner("Tap BOTTOM-RIGHT corner", 5, &br_x, &br_y);
 
-    /* Derive min/max from 4-corner samples */
     s_x_min = (tl_x + bl_x) / 2;
     s_x_max = (tr_x + br_x) / 2;
     s_y_min = (tl_y + tr_y) / 2;
     s_y_max = (bl_y + br_y) / 2;
 
-    /* Persist to NVS */
     nvs_store::put_i32("touch", "cal_x_min", s_x_min);
     nvs_store::put_i32("touch", "cal_x_max", s_x_max);
     nvs_store::put_i32("touch", "cal_y_min", s_y_min);
@@ -166,7 +170,6 @@ void touch::run_calibration() {
     LOG_I("touch", "Cal done: x[%ld..%ld] y[%ld..%ld]",
           (long)s_x_min, (long)s_x_max, (long)s_y_min, (long)s_y_max);
 
-    /* Show confirmation */
     lv_obj_t* msg = lv_obj_create(lv_scr_act());
     lv_obj_set_size(msg, 280, 80);
     lv_obj_center(msg);
@@ -175,10 +178,9 @@ void touch::run_calibration() {
     lv_obj_center(lbl);
     lv_refr_now(NULL);
 
-    /* Wait for any touch to dismiss */
     uint16_t dx, dy;
-    while (!s_tft.getTouch(&dx, &dy)) { delay(20); }
-    while (s_tft.getTouch(&dx, &dy))  { delay(20); }
+    while (!tft->getTouch(&dx, &dy)) { delay(20); }
+    while (tft->getTouch(&dx, &dy))  { delay(20); }
 
     lv_obj_del(msg);
 }
@@ -186,31 +188,38 @@ void touch::run_calibration() {
 namespace touch {
 
 void init() {
-    // DO NOT call s_tft.begin() here.
-    // display::init() → lv_tft_espi_create() already called begin() on the
-    // shared SPI bus and initialised the ST7796 controller.  A second begin()
-    // re-asserts RST and re-sends init commands, corrupting the display and
-    // leaving SPI transactions in an inconsistent state that causes crashes
-    // when touch_read_cb fires during an LVGL flush.  The s_tft instance is
-    // used only for getTouch() (SPI touch reads) which work without begin().
+    /* Goal 1: Default to Phase 0 hardcoded cal values; do NOT auto-run
+     * calibration on first boot.  If NVS has valid cal values, use them.
+     * If absent or corrupt, fall back to hardcoded defaults and log a warning.
+     * Calibration is only triggered explicitly via touch::run_calibration()
+     * (hooked up to Settings → Recalibrate Touch).
+     *
+     * Goal 3: Use display::get_tft() in all touch reads — no local TFT_eSPI.
+     */
 
-    /* Load calibration from NVS */
     uint8_t cal = nvs_store::get_u8("touch", "calibrated", 0);
     if (cal) {
-        s_x_min = nvs_store::get_i32("touch", "cal_x_min", kDefaultXMin);
-        s_x_max = nvs_store::get_i32("touch", "cal_x_max", kDefaultXMax);
-        s_y_min = nvs_store::get_i32("touch", "cal_y_min", kDefaultYMin);
-        s_y_max = nvs_store::get_i32("touch", "cal_y_max", kDefaultYMax);
-        LOG_I("touch", "Loaded cal x[%ld..%ld] y[%ld..%ld]",
-              (long)s_x_min, (long)s_x_max, (long)s_y_min, (long)s_y_max);
+        int32_t xmin = nvs_store::get_i32("touch", "cal_x_min", kDefaultXMin);
+        int32_t xmax = nvs_store::get_i32("touch", "cal_x_max", kDefaultXMax);
+        int32_t ymin = nvs_store::get_i32("touch", "cal_y_min", kDefaultYMin);
+        int32_t ymax = nvs_store::get_i32("touch", "cal_y_max", kDefaultYMax);
+
+        if (cal_values_valid(xmin, xmax, ymin, ymax)) {
+            s_x_min = xmin; s_x_max = xmax;
+            s_y_min = ymin; s_y_max = ymax;
+            LOG_I("touch", "Loaded NVS cal x[%ld..%ld] y[%ld..%ld]",
+                  (long)s_x_min, (long)s_x_max, (long)s_y_min, (long)s_y_max);
+        } else {
+            LOG_W("touch", "NVS cal values corrupt — falling back to Phase 0 defaults");
+            s_x_min = kDefaultXMin; s_x_max = kDefaultXMax;
+            s_y_min = kDefaultYMin; s_y_max = kDefaultYMax;
+        }
     } else {
-        /* First boot — use defaults until calibration completes */
-        s_x_min = kDefaultXMin;
-        s_x_max = kDefaultXMax;
-        s_y_min = kDefaultYMin;
-        s_y_max = kDefaultYMax;
-        LOG_I("touch", "No cal in NVS — running calibration");
-        run_calibration();
+        /* No cal in NVS — use Phase 0 hardcoded defaults, skip cal prompt */
+        s_x_min = kDefaultXMin; s_x_max = kDefaultXMax;
+        s_y_min = kDefaultYMin; s_y_max = kDefaultYMax;
+        LOG_I("touch", "No NVS cal — using Phase 0 defaults x[%ld..%ld] y[%ld..%ld]",
+              (long)s_x_min, (long)s_x_max, (long)s_y_min, (long)s_y_max);
     }
 
     /* Register LVGL input device */
