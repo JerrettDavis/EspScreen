@@ -17,14 +17,11 @@
  */
 
 // SD card SPI clock.
-// 20 MHz proved unreliable on this shared bus (TFT CS stub + display
-// already active at init time caused sdSelectCard Select Failed / FR_NOT_READY).
-// 4 MHz is the safe value that gets the card through CMD0/GO_IDLE reliably.
-// The SD library negotiates higher speed after successful ACMD41, but we
-// lock the bus clock here and let the card do what it can.
-// If 4 MHz mounts reliably and performance is needed, try 10 MHz first,
-// then 20 MHz — but only after confirming the 4 MHz baseline is solid.
-static constexpr uint32_t SD_SCK_HZ = 4000000UL;
+// SD is now on a dedicated VSPI bus (SCK=18, MISO=19, MOSI=23, CS=5),
+// completely separate from the display HSPI bus.  20 MHz is a safe default
+// on a dedicated bus; sd_store.cpp falls back to 4 MHz on retry if the
+// first attempt fails (handles slow-start cards).
+static constexpr uint32_t SD_SCK_HZ = 20000000UL;
 
 namespace spi_bus {
 
