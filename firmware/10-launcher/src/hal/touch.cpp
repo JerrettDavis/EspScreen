@@ -8,13 +8,21 @@
 /**
  * Touch driver — XPT2046 via TFT_eSPI getTouch().
  *
- * Calibration model:
- *   mapped_x = (raw_x - cal_x_min) * 320 / (cal_x_max - cal_x_min)
- *   mapped_y = (raw_y - cal_y_min) * 480 / (cal_y_max - cal_y_min)
- *   Clamped to [0, 319] / [0, 479].
+ * Calibration model (signed-delta, handles axis swap + direction inversion):
+ *   If axis_swap==false:
+ *     mapped_x = (raw_x - x_at_left) * 320 / (x_at_right - x_at_left)
+ *     mapped_y = (raw_y - y_at_top)  * 480 / (y_at_bottom - y_at_top)
+ *   If axis_swap==true (panel mounted 90° — raw_y runs horizontally):
+ *     mapped_x = (raw_y - x_at_left) * 320 / (x_at_right - x_at_left)
+ *     mapped_y = (raw_x - y_at_top)  * 480 / (y_at_bottom - y_at_top)
+ *   Both clamped to [0,319] / [0,479].
+ *   Signed delta means x_at_right can be < x_at_left (mirrored panel) and the
+ *   math still produces the correct mapping automatically.
  *
  * NVS namespace: "touch"
- * Keys: cal_x_min, cal_x_max, cal_y_min, cal_y_max (i32), calibrated (u8)
+ * Keys: cal_x_min (=x_at_left), cal_x_max (=x_at_right),
+ *       cal_y_min (=y_at_top),  cal_y_max (=y_at_bottom)  — all i32
+ *       calibrated (u8), axis_swap (u8, new)
  *
  * Goal 1 — no-cal-required default:
  *   Boot goes directly to the launcher using Phase 0 hardcoded values.
@@ -33,20 +41,30 @@ static const int32_t kDefaultYMin = 264;
 static const int32_t kDefaultYMax = 3532;
 
 /* ── Calibration state ───────────────────────────────────────────── */
-static int32_t s_x_min, s_x_max, s_y_min, s_y_max;
+/* x_at_left / x_at_right: raw ADC for the screen-X axis at left / right edge.
+ * y_at_top  / y_at_bottom: raw ADC for the screen-Y axis at top / bottom edge.
+ * axis_swap: when true, raw_y feeds screen-X and raw_x feeds screen-Y.
+ * Signed deltas mean inverted (mirrored) panels work without extra flags. */
+static int32_t s_x_at_left, s_x_at_right, s_y_at_top, s_y_at_bottom;
+static bool    s_axis_swap = false;
 
 /* ── Goal 1: debug logging flag ──────────────────────────────────── */
 static bool s_debug_touch = false;
 
 /**
- * Validate a set of calibration values.
- * Returns false if any value is out of range or the set is clearly degenerate.
+ * Validate a set of calibration values (signed-delta model).
+ * x_at_left / x_at_right and y_at_top / y_at_bottom can be in either order
+ * (the panel may be inverted), but the absolute spread must be >= 500 counts.
  */
-static bool cal_values_valid(int32_t xmin, int32_t xmax, int32_t ymin, int32_t ymax) {
-    if (xmin < 0 || xmax > 4095 || ymin < 0 || ymax > 4095) return false;
-    if (xmin >= xmax || ymin >= ymax) return false;
-    /* All four identical → almost certainly unwritten garbage */
-    if (xmin == xmax && xmax == ymin && ymin == ymax) return false;
+static bool cal_values_valid(int32_t x_at_left, int32_t x_at_right,
+                             int32_t y_at_top,  int32_t y_at_bottom) {
+    /* Values must be plausible ADC readings */
+    auto inRange = [](int32_t v) { return v >= 0 && v <= 4095; };
+    if (!inRange(x_at_left) || !inRange(x_at_right) ||
+        !inRange(y_at_top)  || !inRange(y_at_bottom)) return false;
+    /* Spread must be at least 500 counts (otherwise it's degenerate / garbage) */
+    if (abs(x_at_right - x_at_left) < 500) return false;
+    if (abs(y_at_bottom - y_at_top) < 500) return false;
     return true;
 }
 
@@ -61,9 +79,15 @@ static void touch_read_cb(lv_indev_t* indev, lv_indev_data_t* data) {
     static bool     s_dbg_pressed  = false;
 
     if (touched) {
-        /* Affine map raw ADC → screen pixels */
-        int32_t mx = ((int32_t)raw_x - s_x_min) * 320 / (s_x_max - s_x_min);
-        int32_t my = ((int32_t)raw_y - s_y_min) * 480 / (s_y_max - s_y_min);
+        /* Apply axis swap: when panel is mounted 90°, raw_y feeds screen-X. */
+        int32_t val_x = s_axis_swap ? (int32_t)raw_y : (int32_t)raw_x;
+        int32_t val_y = s_axis_swap ? (int32_t)raw_x : (int32_t)raw_y;
+
+        /* Signed-delta affine map — handles inversion (x_at_right < x_at_left) */
+        int32_t dx = s_x_at_right - s_x_at_left;
+        int32_t dy = s_y_at_bottom - s_y_at_top;
+        int32_t mx = (dx != 0) ? ((val_x - s_x_at_left) * 320 / dx) : 0;
+        int32_t my = (dy != 0) ? ((val_y - s_y_at_top)  * 480 / dy) : 0;
 
         /* Clamp */
         if (mx < 0)   mx = 0;
@@ -80,8 +104,9 @@ static void touch_read_cb(lv_indev_t* indev, lv_indev_data_t* data) {
             uint32_t now = millis();
             if (now - s_last_dbg_ms >= 100) {
                 s_last_dbg_ms = now;
-                Serial.printf("[touch D] raw=(%u,%u) mapped=(%ld,%ld) pressed=Y\n",
-                              raw_x, raw_y, (long)mx, (long)my);
+                Serial.printf("[touch D] raw=(%u,%u) swap=%s val=(%ld,%ld) mapped=(%ld,%ld) pressed=Y\n",
+                              raw_x, raw_y, s_axis_swap ? "Y" : "N",
+                              (long)val_x, (long)val_y, (long)mx, (long)my);
             }
             s_dbg_pressed = true;
         }
@@ -180,19 +205,22 @@ void touch::run_calibration() {
     collect_corner("Tap BOTTOM-LEFT corner",  5, &bl_x, &bl_y);
     collect_corner("Tap BOTTOM-RIGHT corner", 5, &br_x, &br_y);
 
-    s_x_min = (tl_x + bl_x) / 2;
-    s_x_max = (tr_x + br_x) / 2;
-    s_y_min = (tl_y + tr_y) / 2;
-    s_y_max = (bl_y + br_y) / 2;
+    s_x_at_left   = (tl_x + bl_x) / 2;
+    s_x_at_right  = (tr_x + br_x) / 2;
+    s_y_at_top    = (tl_y + tr_y) / 2;
+    s_y_at_bottom = (bl_y + br_y) / 2;
+    s_axis_swap   = false;  /* legacy blocking cal assumes normal orientation */
 
-    nvs_store::put_i32("touch", "cal_x_min", s_x_min);
-    nvs_store::put_i32("touch", "cal_x_max", s_x_max);
-    nvs_store::put_i32("touch", "cal_y_min", s_y_min);
-    nvs_store::put_i32("touch", "cal_y_max", s_y_max);
-    nvs_store::put_u8("touch", "calibrated", 1);
+    nvs_store::put_i32("touch", "cal_x_min",  s_x_at_left);
+    nvs_store::put_i32("touch", "cal_x_max",  s_x_at_right);
+    nvs_store::put_i32("touch", "cal_y_min",  s_y_at_top);
+    nvs_store::put_i32("touch", "cal_y_max",  s_y_at_bottom);
+    nvs_store::put_u8 ("touch", "axis_swap",  0);
+    nvs_store::put_u8 ("touch", "calibrated", 1);
 
-    LOG_I("touch", "Cal done: x[%ld..%ld] y[%ld..%ld]",
-          (long)s_x_min, (long)s_x_max, (long)s_y_min, (long)s_y_max);
+    LOG_I("touch", "Cal done: x[%ld->%ld] y[%ld->%ld]",
+          (long)s_x_at_left, (long)s_x_at_right,
+          (long)s_y_at_top,  (long)s_y_at_bottom);
 
     lv_obj_t* msg = lv_obj_create(lv_scr_act());
     lv_obj_set_size(msg, 280, 80);
@@ -224,13 +252,18 @@ bool get_debug() {
 
 /* ── Hot-reload calibration values ──────────────────────────────── */
 
-void apply_cal(int32_t x_min, int32_t x_max, int32_t y_min, int32_t y_max) {
-    s_x_min = x_min;
-    s_x_max = x_max;
-    s_y_min = y_min;
-    s_y_max = y_max;
-    LOG_I("touch", "Cal applied (hot): x[%ld..%ld] y[%ld..%ld]",
-          (long)s_x_min, (long)s_x_max, (long)s_y_min, (long)s_y_max);
+void apply_cal(int32_t x_at_left, int32_t x_at_right,
+               int32_t y_at_top,  int32_t y_at_bottom,
+               bool axis_swap) {
+    s_x_at_left   = x_at_left;
+    s_x_at_right  = x_at_right;
+    s_y_at_top    = y_at_top;
+    s_y_at_bottom = y_at_bottom;
+    s_axis_swap   = axis_swap;
+    LOG_I("touch", "Cal applied (hot): swap=%s x[%ld->%ld] y[%ld->%ld]",
+          axis_swap ? "Y" : "N",
+          (long)s_x_at_left, (long)s_x_at_right,
+          (long)s_y_at_top,  (long)s_y_at_bottom);
 }
 
 void init() {
@@ -241,31 +274,41 @@ void init() {
      * (hooked up to Settings → Recalibrate Touch).
      *
      * Goal 3: Use display::get_tft() in all touch reads — no local TFT_eSPI.
+     *
+     * NVS key axis_swap (u8, default 0): set by calibrate.cpp when it detects
+     * that the panel's physical X wire runs along the screen's vertical axis.
      */
 
     uint8_t cal = nvs_store::get_u8("touch", "calibrated", 0);
     if (cal) {
-        int32_t xmin = nvs_store::get_i32("touch", "cal_x_min", kDefaultXMin);
-        int32_t xmax = nvs_store::get_i32("touch", "cal_x_max", kDefaultXMax);
-        int32_t ymin = nvs_store::get_i32("touch", "cal_y_min", kDefaultYMin);
-        int32_t ymax = nvs_store::get_i32("touch", "cal_y_max", kDefaultYMax);
+        int32_t xl = nvs_store::get_i32("touch", "cal_x_min", kDefaultXMin);
+        int32_t xr = nvs_store::get_i32("touch", "cal_x_max", kDefaultXMax);
+        int32_t yt = nvs_store::get_i32("touch", "cal_y_min", kDefaultYMin);
+        int32_t yb = nvs_store::get_i32("touch", "cal_y_max", kDefaultYMax);
+        bool    sw = nvs_store::get_u8("touch", "axis_swap", 0) != 0;
 
-        if (cal_values_valid(xmin, xmax, ymin, ymax)) {
-            s_x_min = xmin; s_x_max = xmax;
-            s_y_min = ymin; s_y_max = ymax;
-            LOG_I("touch", "Loaded NVS cal x[%ld..%ld] y[%ld..%ld]",
-                  (long)s_x_min, (long)s_x_max, (long)s_y_min, (long)s_y_max);
+        if (cal_values_valid(xl, xr, yt, yb)) {
+            s_x_at_left   = xl; s_x_at_right  = xr;
+            s_y_at_top    = yt; s_y_at_bottom = yb;
+            s_axis_swap   = sw;
+            LOG_I("touch", "Loaded NVS cal swap=%s x[%ld->%ld] y[%ld->%ld]",
+                  sw ? "Y" : "N",
+                  (long)s_x_at_left, (long)s_x_at_right,
+                  (long)s_y_at_top,  (long)s_y_at_bottom);
         } else {
             LOG_W("touch", "NVS cal values corrupt — falling back to Phase 0 defaults");
-            s_x_min = kDefaultXMin; s_x_max = kDefaultXMax;
-            s_y_min = kDefaultYMin; s_y_max = kDefaultYMax;
+            s_x_at_left  = kDefaultXMin; s_x_at_right  = kDefaultXMax;
+            s_y_at_top   = kDefaultYMin; s_y_at_bottom = kDefaultYMax;
+            s_axis_swap  = false;
         }
     } else {
         /* No cal in NVS — use Phase 0 hardcoded defaults, skip cal prompt */
-        s_x_min = kDefaultXMin; s_x_max = kDefaultXMax;
-        s_y_min = kDefaultYMin; s_y_max = kDefaultYMax;
-        LOG_I("touch", "No NVS cal — using Phase 0 defaults x[%ld..%ld] y[%ld..%ld]",
-              (long)s_x_min, (long)s_x_max, (long)s_y_min, (long)s_y_max);
+        s_x_at_left  = kDefaultXMin; s_x_at_right  = kDefaultXMax;
+        s_y_at_top   = kDefaultYMin; s_y_at_bottom = kDefaultYMax;
+        s_axis_swap  = false;
+        LOG_I("touch", "No NVS cal — using Phase 0 defaults x[%ld->%ld] y[%ld->%ld]",
+              (long)s_x_at_left, (long)s_x_at_right,
+              (long)s_y_at_top,  (long)s_y_at_bottom);
         /* Goal 4: prompt user to calibrate without blocking boot */
         Serial.println("[touch] No cal in NVS. Type 'cal' to calibrate, or any tap will use Phase 0 defaults.");
     }

@@ -27,6 +27,13 @@ namespace touch {
      * Apply a new set of calibration values immediately (hot-reload).
      * Called by calibrate.cpp after the hold-to-settle sequence completes.
      * Values must already be validated and saved to NVS before calling this.
+     *
+     * x_at_left / x_at_right are the raw ADC values of the axis used for screen-X
+     * at the left and right screen edges respectively (may be inverted: left > right).
+     * y_at_top / y_at_bottom likewise for screen-Y.
+     * axis_swap: true when the panel's physical X wire runs vertically (raw_y → screen-X).
      */
-    void apply_cal(int32_t x_min, int32_t x_max, int32_t y_min, int32_t y_max);
+    void apply_cal(int32_t x_at_left, int32_t x_at_right,
+                   int32_t y_at_top,  int32_t y_at_bottom,
+                   bool axis_swap);
 }
