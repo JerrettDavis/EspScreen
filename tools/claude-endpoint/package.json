@@ -1,0 +1,13 @@
+{
+  "name": "claude-endpoint",
+  "version": "0.1.0",
+  "description": "Local HTTP server exposing Claude Code usage data for ESP32 polling",
+  "type": "module",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
