@@ -5,15 +5,21 @@
  *   1. Display crosshair + progress arc at the target point.
  *   2. User presses and HOLDS the stylus on the target.
  *   3. Firmware samples raw XPT2046 readings at ~30 Hz.
- *   4. First 30 samples build the sliding window (arc 0%→50%).
- *   5. Once the window has ≥30 samples AND std-dev for both X and Y
- *      is < 15 ADC counts, a stability counter increments.
- *      30 consecutive stable samples fills arc 50%→100%.
- *      If std-dev spikes above 15, stability counter resets to 0
+ *   4. First 20 samples build the sliding window (arc 0%→50%).
+ *   5. Once the window has ≥20 samples AND std-dev for both X and Y
+ *      is < 30 ADC counts, a stability counter increments.
+ *      15 consecutive stable samples fills arc 50%→100%.
+ *      If std-dev spikes above 30, stability counter resets to 0
  *      and the arc decays back to 50%.
  *   6. On 100%: record mean, flash crosshair green, wait 300 ms, next corner.
  *   7. Release before 100%: reset state back to "Hold steady...".
- *   8. No touch for 30 s: abort, pop back without saving.
+ *   8. No touch for 60 s: show failure banner for 3 s, retry from corner 0.
+ *
+ * On any failure (timeout, sanity-check rejection, NVS error):
+ *   - Shows a red "Calibration failed" banner with the reason for 3 s.
+ *   - Logs a comprehensive diagnostic line.
+ *   - Resets to corner 0 and retries.
+ *   - Cancel button is the ONLY deliberate exit path (shows confirmation dialog).
  *
  * Raw reads use display::get_tft()->getTouch() directly (bypasses the
  * currently-mis-calibrated affine map in touch_read_cb).
@@ -54,10 +60,11 @@ static const char* kCornerNames[4] = {
 /* ── Sampling parameters ─────────────────────────────────────────── */
 #define SAMPLE_HZ          30        /* samples per second            */
 #define SAMPLE_INTERVAL_MS 33        /* 1000/30 ≈ 33 ms               */
-#define WINDOW_SIZE        20        /* sliding window length (was 30) */
-#define STABLE_CYCLES      15        /* consecutive stable cycles req. (was 30) */
-#define STDDEV_THRESHOLD   30.0f     /* ADC counts (was 15.0 — XPT2046 is noisy) */
-#define TIMEOUT_MS         30000     /* abandon if no touch for 30 s   */
+#define WINDOW_SIZE        20        /* sliding window length          */
+#define STABLE_CYCLES      15        /* consecutive stable cycles req. */
+#define STDDEV_THRESHOLD   30.0f     /* ADC counts                    */
+#define TIMEOUT_MS         60000     /* abandon corner if no touch for 60 s */
+#define FAILURE_BANNER_MS  3000      /* show failure banner for 3 s   */
 
 /* ── LVGL widget handles ─────────────────────────────────────────── */
 static lv_obj_t* s_scr          = nullptr;
@@ -68,6 +75,7 @@ static lv_obj_t* s_status_lbl   = nullptr;
 static lv_obj_t* s_h_line       = nullptr;   /* horizontal bar of crosshair */
 static lv_obj_t* s_v_line       = nullptr;   /* vertical bar of crosshair   */
 static lv_obj_t* s_cancel_btn   = nullptr;
+static lv_obj_t* s_confirm_box  = nullptr;   /* cancel-confirmation modal   */
 
 /* ── State machine ───────────────────────────────────────────────── */
 static int     s_corner          = 0;
@@ -151,16 +159,98 @@ static void set_title(int corner_idx) {
     if (s_title_lbl) lv_label_set_text(s_title_lbl, buf);
 }
 
-/* ── Advance to next corner (or finish) ──────────────────────────── */
+/* ── Forward declarations ────────────────────────────────────────── */
 
 static void advance_corner();
 static void finish_calibration();
-static void abort_calibration(const char* reason);
+static void fail_and_retry(const char* reason, int failed_corner);
+static void reset_to_corner0();
+static void do_cancel_pop();
+
+/* ── Build the calibration screen ────────────────────────────────── */
+/* Forward-declared so cancel_cb / confirm callbacks can reference it */
+static lv_obj_t* build_screen();
+
+/* ── Cancel confirmation callbacks ──────────────────────────────── */
+
+static void confirm_yes_cb(lv_event_t* e) {
+    /* User confirmed cancel — destroy modal and pop to launcher */
+    if (s_confirm_box) {
+        lv_obj_delete(s_confirm_box);
+        s_confirm_box = nullptr;
+    }
+    do_cancel_pop();
+}
+
+static void confirm_no_cb(lv_event_t* e) {
+    /* User chose "No" — dismiss modal, continue calibrating */
+    if (s_confirm_box) {
+        lv_obj_delete(s_confirm_box);
+        s_confirm_box = nullptr;
+    }
+    /* Timer keeps running normally — the dialog just blocked input via the
+     * s_confirm_box guard in cal_timer_cb. Nothing else to do. */
+}
+
+/* ── Cancel button callback ──────────────────────────────────────── */
+
+static void cancel_cb(lv_event_t* e) {
+    /* Don't open a second dialog if one is already showing */
+    if (s_confirm_box) return;
+
+    /* Build a small confirmation modal */
+    s_confirm_box = lv_obj_create(s_scr);
+    lv_obj_set_size(s_confirm_box, 260, 130);
+    lv_obj_center(s_confirm_box);
+    lv_obj_set_style_bg_color(s_confirm_box, lv_color_hex(0x222222), 0);
+    lv_obj_set_style_border_color(s_confirm_box, lv_color_hex(0x888888), 0);
+    lv_obj_set_style_border_width(s_confirm_box, 1, 0);
+    lv_obj_set_style_radius(s_confirm_box, 8, 0);
+    lv_obj_set_style_pad_all(s_confirm_box, 12, 0);
+
+    lv_obj_t* msg = lv_label_create(s_confirm_box);
+    lv_label_set_text(msg, "Cancel calibration?\nExisting cal will be kept.");
+    lv_obj_set_style_text_color(msg, lv_color_hex(0xffffff), 0);
+    lv_obj_set_style_text_align(msg, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_long_mode(msg, LV_LABEL_LONG_WRAP);
+    lv_obj_set_width(msg, 230);
+    lv_obj_align(msg, LV_ALIGN_TOP_MID, 0, 0);
+
+    lv_obj_t* yes_btn = lv_button_create(s_confirm_box);
+    lv_obj_set_size(yes_btn, 90, 36);
+    lv_obj_align(yes_btn, LV_ALIGN_BOTTOM_LEFT, 8, 0);
+    lv_obj_set_style_bg_color(yes_btn, lv_color_hex(0xcc3333), 0);
+    lv_obj_add_event_cb(yes_btn, confirm_yes_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t* yes_lbl = lv_label_create(yes_btn);
+    lv_label_set_text(yes_lbl, "Yes, cancel");
+    lv_obj_center(yes_lbl);
+
+    lv_obj_t* no_btn = lv_button_create(s_confirm_box);
+    lv_obj_set_size(no_btn, 90, 36);
+    lv_obj_align(no_btn, LV_ALIGN_BOTTOM_RIGHT, -8, 0);
+    lv_obj_set_style_bg_color(no_btn, lv_color_hex(0x336633), 0);
+    lv_obj_add_event_cb(no_btn, confirm_no_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t* no_lbl = lv_label_create(no_btn);
+    lv_label_set_text(no_lbl, "No, continue");
+    lv_obj_center(no_lbl);
+}
+
+/* ── Actual pop-to-launcher (used by Cancel-confirmed path) ──────── */
+
+static void do_cancel_pop() {
+    s_cal_running = false;
+    if (s_timer) { lv_timer_delete(s_timer); s_timer = nullptr; }
+    LOG_W("cal", "User cancelled calibration");
+    Serial.println("[cal] User cancelled — popping to launcher");
+    screen_router::pop();
+}
 
 /* ── LVGL timer callback — called every SAMPLE_INTERVAL_MS ──────── */
 
 static void cal_timer_cb(lv_timer_t* timer) {
     if (!s_cal_running) return;
+    /* Don't sample while confirmation dialog is open */
+    if (s_confirm_box) return;
 
     TFT_eSPI* tft = display::get_tft();
     uint16_t rx = 0, ry = 0;
@@ -171,8 +261,10 @@ static void cal_timer_cb(lv_timer_t* timer) {
     if (touched) {
         s_last_touch_ms = now;
     } else if (now - s_last_touch_ms > TIMEOUT_MS) {
-        Serial.printf("[cal] Corner %d TIMEOUT after 30s — aborting\n", s_corner);
-        abort_calibration("Timeout — no touch detected");
+        Serial.printf("[cal] Corner %d TIMEOUT after 60s\n", s_corner);
+        char reason[64];
+        snprintf(reason, sizeof(reason), "Timeout — no touch on corner %d", s_corner);
+        fail_and_retry(reason, s_corner);
         return;
     }
 
@@ -229,7 +321,6 @@ static void cal_timer_cb(lv_timer_t* timer) {
             } else {
                 /* Spike — decay arc back to 50% and reset stability counter */
                 if (s_stable_count > 0) {
-                    /* Only log resets, not every unstable sample from scratch */
                     Serial.printf("[cal] Corner %d: stability lost (stddev=(%.1f,%.1f)) — counter reset from %d\n",
                                   s_corner, sx, sy, s_stable_count);
                 }
@@ -311,6 +402,120 @@ static void advance_corner() {
     lv_refr_now(NULL);
 }
 
+/* ── Reset all cal state back to corner 0 ────────────────────────── */
+
+static void reset_to_corner0() {
+    s_corner        = 0;
+    s_win_count     = 0;
+    s_win_head      = 0;
+    s_stable_count  = 0;
+    s_was_touched   = false;
+    s_last_touch_ms = millis();
+    s_last_sample_ms = 0;
+
+    /* Zero all corner accumulators */
+    for (int i = 0; i < 4; i++) {
+        s_corner_x[i] = 0;
+        s_corner_y[i] = 0;
+    }
+
+    /* Restore cal screen widgets (may have been cleaned on success path) */
+    if (!s_title_lbl || !lv_obj_is_valid(s_title_lbl)) {
+        /* Screen was cleaned — rebuild it */
+        if (s_scr && lv_obj_is_valid(s_scr)) {
+            lv_obj_delete(s_scr);
+        }
+        s_scr = build_screen();
+        screen_router::push_silent(s_scr);
+        lv_scr_load(s_scr);
+    }
+
+    set_title(0);
+    set_status("Hold steady...");
+    set_arc(0);
+    position_crosshair(kCorners[0].x, kCorners[0].y, lv_color_hex(0xffffff));
+    lv_refr_now(NULL);
+}
+
+/* ── Show failure banner for FAILURE_BANNER_MS, then retry ──────── */
+
+static void fail_and_retry(const char* reason, int failed_corner) {
+    /* Stop the sampling timer while we show the banner */
+    s_cal_running = false;
+    if (s_timer) { lv_timer_delete(s_timer); s_timer = nullptr; }
+
+    /* Collect whatever corner data we have for the diagnostic line */
+    int32_t x_min = 0, x_max = 0, y_min = 0, y_max = 0;
+    if (failed_corner >= 4) {
+        /* We had all corners — compute the same values as finish_calibration */
+        x_min = (s_corner_x[0] + s_corner_x[3]) / 2;
+        x_max = (s_corner_x[1] + s_corner_x[2]) / 2;
+        y_min = (s_corner_y[0] + s_corner_y[1]) / 2;
+        y_max = (s_corner_y[3] + s_corner_y[2]) / 2;
+    }
+
+    Serial.printf("[cal] FAILURE corner=%d reason=\"%s\" "
+                  "raw_tl=(%ld,%ld) raw_tr=(%ld,%ld) raw_br=(%ld,%ld) raw_bl=(%ld,%ld) "
+                  "computed_x_min=%ld computed_x_max=%ld computed_y_min=%ld computed_y_max=%ld\n",
+                  failed_corner, reason,
+                  (long)s_corner_x[0], (long)s_corner_y[0],
+                  (long)s_corner_x[1], (long)s_corner_y[1],
+                  (long)s_corner_x[2], (long)s_corner_y[2],
+                  (long)s_corner_x[3], (long)s_corner_y[3],
+                  (long)x_min, (long)x_max, (long)y_min, (long)y_max);
+    LOG_W("cal", "FAILURE: %s — restarting from corner 0", reason);
+    Serial.printf("[cal] FAILURE: %s — restarting from corner 0\n", reason);
+
+    /* Show red failure banner over the current screen */
+    if (s_scr && lv_obj_is_valid(s_scr)) {
+        /* Overlay a semi-transparent panel */
+        lv_obj_t* panel = lv_obj_create(s_scr);
+        lv_obj_set_size(panel, SCREEN_W - 40, 120);
+        lv_obj_center(panel);
+        lv_obj_set_style_bg_color(panel, lv_color_hex(0x440000), 0);
+        lv_obj_set_style_border_color(panel, lv_color_hex(0xff0000), 0);
+        lv_obj_set_style_border_width(panel, 2, 0);
+        lv_obj_set_style_radius(panel, 8, 0);
+        lv_obj_set_style_pad_all(panel, 10, 0);
+
+        lv_obj_t* big_lbl = lv_label_create(panel);
+        lv_label_set_text(big_lbl, "Calibration failed");
+        lv_obj_set_style_text_color(big_lbl, lv_color_hex(0xff4444), 0);
+        /* Make it large via font — use the built-in montserrat_20 if available */
+        lv_obj_set_style_text_font(big_lbl, &lv_font_montserrat_20, 0);
+        lv_obj_align(big_lbl, LV_ALIGN_TOP_MID, 0, 0);
+
+        lv_obj_t* reason_lbl = lv_label_create(panel);
+        lv_label_set_text(reason_lbl, reason);
+        lv_obj_set_style_text_color(reason_lbl, lv_color_hex(0xffaaaa), 0);
+        lv_obj_set_style_text_align(reason_lbl, LV_TEXT_ALIGN_CENTER, 0);
+        lv_label_set_long_mode(reason_lbl, LV_LABEL_LONG_WRAP);
+        lv_obj_set_width(reason_lbl, SCREEN_W - 80);
+        lv_obj_align(reason_lbl, LV_ALIGN_BOTTOM_MID, 0, 0);
+
+        lv_refr_now(NULL);
+
+        /* Block for FAILURE_BANNER_MS, pumping LVGL */
+        uint32_t banner_start = millis();
+        while (millis() - banner_start < FAILURE_BANNER_MS) {
+            lv_timer_handler();
+            delay(20);
+        }
+
+        /* Remove the overlay panel */
+        lv_obj_delete(panel);
+    }
+
+    /* Reset state and redraw corner 0 */
+    reset_to_corner0();
+
+    /* Restart the sampling timer */
+    s_cal_running = true;
+    s_timer = lv_timer_create(cal_timer_cb, SAMPLE_INTERVAL_MS, nullptr);
+
+    Serial.println("[cal] Retry started — corner 0/4 (TL)");
+}
+
 /* ── Finish: validate, save, hot-apply ───────────────────────────── */
 
 static void finish_calibration() {
@@ -350,7 +555,11 @@ static void finish_calibration() {
     if (x_min >= x_max || y_min >= y_max) {
         Serial.printf("[cal] REJECT: x_min(%ld) >= x_max(%ld) or y_min(%ld) >= y_max(%ld)\n",
                       (long)x_min, (long)x_max, (long)y_min, (long)y_max);
-        abort_calibration("Error: degenerate cal (min >= max)");
+        char reason[96];
+        snprintf(reason, sizeof(reason),
+                 "Bad values: x range too small (min=%ld max=%ld)",
+                 (long)x_min, (long)x_max);
+        fail_and_retry(reason, 4);
         return;
     }
 
@@ -360,7 +569,11 @@ static void finish_calibration() {
     if (x_range < 500 || y_range < 500) {
         Serial.printf("[cal] REJECT: range too small — x_range=%ld y_range=%ld (need >=500 each)\n",
                       (long)x_range, (long)y_range);
-        abort_calibration("Error: cal range too small (<500 ADC counts)");
+        char reason[96];
+        snprintf(reason, sizeof(reason),
+                 "Bad values: x range too small (min=%ld max=%ld)",
+                 (long)x_min, (long)x_max);
+        fail_and_retry(reason, 4);
         return;
     }
 
@@ -368,19 +581,29 @@ static void finish_calibration() {
     if (x_min == 0 || x_max == 4095 || y_min == 0 || y_max == 4095) {
         Serial.printf("[cal] REJECT: stuck ADC value (0 or 4095) in x[%ld..%ld] y[%ld..%ld]\n",
                       (long)x_min, (long)x_max, (long)y_min, (long)y_max);
-        abort_calibration("Error: stuck ADC (0 or 4095 detected)");
+        fail_and_retry("Bad values: stuck ADC at 0 or 4095", 4);
         return;
     }
 
     /* NOTE: Removed the old 100..4000 outer-bound check — some panels read outside that range */
     Serial.println("[cal] SAVE: ok — all sanity checks passed");
 
-    /* Save to NVS */
+    /* Save to NVS — nvs_store API is void; verify by reading back */
     nvs_store::put_i32("touch", "cal_x_min", x_min);
     nvs_store::put_i32("touch", "cal_x_max", x_max);
     nvs_store::put_i32("touch", "cal_y_min", y_min);
     nvs_store::put_i32("touch", "cal_y_max", y_max);
     nvs_store::put_u8 ("touch", "calibrated", 1);
+
+    /* Readback verify */
+    int32_t rb_xmin = nvs_store::get_i32("touch", "cal_x_min", -1);
+    int32_t rb_xmax = nvs_store::get_i32("touch", "cal_x_max", -1);
+    if (rb_xmin != x_min || rb_xmax != x_max) {
+        Serial.printf("[cal] REJECT: NVS readback mismatch (wrote x[%ld..%ld] read x[%ld..%ld])\n",
+                      (long)x_min, (long)x_max, (long)rb_xmin, (long)rb_xmax);
+        fail_and_retry("NVS save failed", 4);
+        return;
+    }
     Serial.println("[cal] NVS write ok");
 
     /* Hot-apply immediately */
@@ -398,6 +621,16 @@ static void finish_calibration() {
     lv_obj_center(lbl);
     lv_refr_now(NULL);
 
+    /* Null out widget handles — screen was cleaned */
+    s_title_lbl  = nullptr;
+    s_sub_lbl    = nullptr;
+    s_arc        = nullptr;
+    s_status_lbl = nullptr;
+    s_h_line     = nullptr;
+    s_v_line     = nullptr;
+    s_cancel_btn = nullptr;
+    s_confirm_box = nullptr;
+
     /* Wait for any tap using raw getTouch (calibration is now applied) */
     TFT_eSPI* tft = display::get_tft();
     uint16_t dx, dy;
@@ -409,45 +642,6 @@ static void finish_calibration() {
     while (tft->getTouch(&dx, &dy)) { delay(20); }
 
     screen_router::pop();
-}
-
-/* ── Abort without saving ────────────────────────────────────────── */
-
-static void abort_calibration(const char* reason) {
-    s_cal_running = false;
-    if (s_timer) { lv_timer_delete(s_timer); s_timer = nullptr; }
-
-    LOG_W("cal", "Aborted: %s", reason);
-    Serial.printf("[cal] Aborted: %s\n", reason);
-
-    if (s_scr) {
-        lv_obj_clean(s_scr);
-        lv_obj_t* lbl = lv_label_create(s_scr);
-        char buf[128];
-        snprintf(buf, sizeof(buf), "Calibration cancelled.\n%s\nTap to return.", reason);
-        lv_label_set_text(lbl, buf);
-        lv_obj_set_style_text_color(lbl, lv_color_hex(0xff4444), 0);
-        lv_obj_center(lbl);
-        lv_obj_set_style_text_align(lbl, LV_TEXT_ALIGN_CENTER, 0);
-        lv_refr_now(NULL);
-
-        TFT_eSPI* tft = display::get_tft();
-        uint16_t dx, dy;
-        uint32_t wait_start = millis();
-        while (!tft->getTouch(&dx, &dy) && (millis() - wait_start < 10000)) {
-            lv_timer_handler();
-            delay(20);
-        }
-        while (tft->getTouch(&dx, &dy)) { delay(20); }
-    }
-
-    screen_router::pop();
-}
-
-/* ── Cancel button callback ──────────────────────────────────────── */
-
-static void cancel_cb(lv_event_t* e) {
-    abort_calibration("User cancelled");
 }
 
 /* ── Build the calibration screen ────────────────────────────────── */
@@ -540,6 +734,9 @@ void launch() {
     s_last_touch_ms = millis();
     s_last_sample_ms = 0;
     s_cal_running   = true;
+    s_confirm_box   = nullptr;
+
+    for (int i = 0; i < 4; i++) { s_corner_x[i] = 0; s_corner_y[i] = 0; }
 
     if (s_timer) { lv_timer_delete(s_timer); s_timer = nullptr; }
 
@@ -566,9 +763,11 @@ void launch() {
 
     LOG_I("cal", "Screen created — corner 0/4 (TL) — hold-to-settle calibration started");
     Serial.println("[cal] Screen created — corner 0/4 (TL)");
-    Serial.printf("[cal] Thresholds: WINDOW=%d STABLE_CYCLES=%d STDDEV_MAX=%.0f\n",
-                  WINDOW_SIZE, STABLE_CYCLES, STDDEV_THRESHOLD);
+    Serial.printf("[cal] Thresholds: WINDOW=%d STABLE_CYCLES=%d STDDEV_MAX=%.0f TIMEOUT=%ds\n",
+                  WINDOW_SIZE, STABLE_CYCLES, STDDEV_THRESHOLD, TIMEOUT_MS / 1000);
     Serial.println("[cal] Calibration started. Hold stylus on each crosshair until the ring fills.");
+    Serial.println("[cal] On failure: red banner shown for 3s, then retry from corner 0.");
+    Serial.println("[cal] Cancel button (bottom-right) shows confirmation before exiting.");
 }
 
 lv_obj_t* create_screen() {
