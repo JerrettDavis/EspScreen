@@ -68,8 +68,11 @@ void setup() {
 
     /* ── Build and load the launcher screen ─────────────────────── */
     lv_obj_t* home = launcher::create_screen();
+    Serial.printf("[main] launcher created scr=%p\n", (void*)home);
     screen_router::push(home);
+    Serial.printf("[main] after router push(home): active=%p\n", (void*)lv_scr_act());
     lv_scr_load(home);  // immediate load (no animation on first screen)
+    Serial.printf("[main] after lv_scr_load(home): active=%p\n", (void*)lv_scr_act());
 
     LOG_I("main", "UI ready. Free heap=%lu", (unsigned long)esp_get_free_heap_size());
 
@@ -78,8 +81,9 @@ void setup() {
 
     /* ── Check if 'cal' was typed during recovery window ─────────── */
     if (recovery::pending_cal()) {
-        Serial.println("[main] Pending cal request — launching calibration");
+        Serial.println("[main] Pending cal — entering calibrate::launch()");
         calibrate::launch();
+        Serial.printf("[main] calibrate::launch() returned: active=%p\n", (void*)lv_scr_act());
     }
 }
 
@@ -108,11 +112,26 @@ static void dispatch_serial_cmd(const String& cmd) {
     }
 }
 
+/* Track active screen pointer across loop iterations to detect rogue swaps */
+static lv_obj_t* s_last_active_scr = nullptr;
+static int s_loop_count = 0;
+
 void loop() {
     /* LVGL task handler — must be called regularly.
      * 5 ms delay keeps ~200 Hz polling, well above the 60 Hz refresh.
      */
     lv_timer_handler();
+
+    /* Diagnostic: log any screen change for first 100 loop iterations */
+    if (s_loop_count < 100) {
+        s_loop_count++;
+        lv_obj_t* cur = lv_scr_act();
+        if (cur != s_last_active_scr) {
+            Serial.printf("[loop #%d] screen changed: %p -> %p\n",
+                          s_loop_count, (void*)s_last_active_scr, (void*)cur);
+            s_last_active_scr = cur;
+        }
+    }
 
     /* ── Non-blocking serial command reader ─────────────────────── */
     while (Serial.available()) {

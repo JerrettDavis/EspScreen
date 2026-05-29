@@ -3,6 +3,7 @@
 #include "../../os/screen_router.h"
 #include "../../ui/widgets.h"
 #include <lvgl.h>
+#include <Arduino.h>
 
 namespace launcher {
 
@@ -14,6 +15,7 @@ static void tile_click_cb(lv_event_t* e) {
 }
 
 lv_obj_t* create_screen() {
+    Serial.println("[launcher] create_screen() entered");
     lv_obj_t* scr = lv_obj_create(NULL);
     lv_obj_set_size(scr, LV_HOR_RES, LV_VER_RES);
     lv_obj_set_style_bg_color(scr, lv_color_hex(0x1a1a2e), 0);
@@ -43,6 +45,7 @@ lv_obj_t* create_screen() {
         lv_obj_add_event_cb(tile, tile_click_cb, LV_EVENT_CLICKED, (void*)entry);
     }
 
+    Serial.printf("[launcher] create_screen() returning scr=%p\n", (void*)scr);
     return scr;
 }
 

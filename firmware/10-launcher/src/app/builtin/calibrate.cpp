@@ -453,6 +453,7 @@ static void cancel_cb(lv_event_t* e) {
 /* ── Build the calibration screen ────────────────────────────────── */
 
 static lv_obj_t* build_screen() {
+    Serial.println("[cal] build_screen() entered");
     /* Full-screen black background */
     lv_obj_t* scr = lv_obj_create(NULL);
     lv_obj_set_size(scr, LV_HOR_RES, LV_VER_RES);
@@ -518,6 +519,9 @@ static lv_obj_t* build_screen() {
     /* Position crosshair at corner 0 */
     position_crosshair(kCorners[0].x, kCorners[0].y, lv_color_hex(0xffffff));
 
+    int child_count = lv_obj_get_child_count(scr);
+    Serial.printf("[cal] build_screen() returning scr=%p with %d children\n",
+                  (void*)scr, child_count);
     return scr;
 }
 
@@ -526,6 +530,7 @@ static lv_obj_t* build_screen() {
 namespace calibrate {
 
 void launch() {
+    Serial.println("[cal] launch() step 1: resetting state");
     /* Reset state */
     s_corner        = 0;
     s_win_count     = 0;
@@ -538,10 +543,20 @@ void launch() {
 
     if (s_timer) { lv_timer_delete(s_timer); s_timer = nullptr; }
 
+    Serial.println("[cal] launch() step 2: building screen");
     s_scr = build_screen();
-    screen_router::push(s_scr);
-    lv_scr_load(s_scr);   /* force-active immediately — no animation gap where
-                            * the launcher can receive a spurious startup touch */
+    /* Use push_silent to register in router stack WITHOUT queuing a lv_scr_load_anim —
+     * calling push() first then lv_scr_load() causes LVGL 9 to ignore the second load
+     * call because the fade animation is already pending. push_silent lets us own
+     * the actual screen switch via lv_scr_load(). */
+    Serial.printf("[cal] launch() step 3: calling screen_router::push_silent(scr=%p) active_before=%p\n",
+                  (void*)s_scr, (void*)lv_scr_act());
+    screen_router::push_silent(s_scr);
+    Serial.printf("[cal] launch() step 4: after push_silent active=%p\n", (void*)lv_scr_act());
+    lv_scr_load(s_scr);   /* immediate switch — no animation, no conflict */
+    Serial.printf("[cal] launch() step 5: after lv_scr_load active=%p (cal_scr=%p match=%s)\n",
+                  (void*)lv_scr_act(), (void*)s_scr,
+                  (lv_scr_act() == s_scr) ? "YES" : "NO");
 
     set_title(0);
     set_status("Hold steady...");
