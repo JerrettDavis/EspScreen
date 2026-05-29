@@ -1,0 +1,62 @@
+{
+  "version": 1,
+  "device": {
+    "name": "EspScreen-01",
+    "mode": "standalone"
+  },
+  "display": {
+    "rotation": 0,
+    "backlight_pct": 80,
+    "idle_dim_pct": 20,
+    "idle_timeout_sec": 60
+  },
+  "pins": {
+    "tft": {
+      "mosi": 13,
+      "miso": 12,
+      "sclk": 14,
+      "cs": 15,
+      "dc": 2,
+      "rst": -1,
+      "bl": 27
+    },
+    "touch": {
+      "cs": 33,
+      "irq": 36
+    },
+    "sd": {
+      "cs": 5
+    },
+    "leds": []
+  },
+  "network": {
+    "wifi": {
+      "ssid": "",
+      "password": "",
+      "hostname": "espscreen"
+    },
+    "ble": {
+      "enabled": false
+    }
+  },
+  "apps": {
+    "autostart": "launcher",
+    "claude_widget": {
+      "endpoint": "http://192.168.1.50:8080/claude/status",
+      "poll_sec": 60,
+      "timeout_sec": 5
+    }
+  },
+  "leds": {
+    "default_effect": "off",
+    "alert_effect": "pulse_red"
+  },
+  "security": {
+    "allow_unsigned_apps": true,
+    "ota_url": ""
+  },
+  "logging": {
+    "level": "info",
+    "to_sd": false
+  }
+}
