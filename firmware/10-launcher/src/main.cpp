@@ -20,7 +20,7 @@
 #include "os/screen_router.h"
 #include "ui/theme.h"
 #include "app/builtin/launcher.h"
-#include "app/builtin/calibrate.h"
+// calibrate.h intentionally excluded — cal is disabled (touch uses factory defaults)
 
 /* ── Non-blocking serial command reader ─────────────────────────── */
 static String s_serial_buf;
@@ -77,21 +77,22 @@ void setup() {
     LOG_I("main", "UI ready. Free heap=%lu", (unsigned long)esp_get_free_heap_size());
 
     /* ── Serial command help banner ──────────────────────────────── */
-    Serial.println("[main] Serial commands: cal | tdbg | info | reset");
+    Serial.println("[main] Serial commands: tdbg | info | reset  (cal disabled — factory defaults)");
 
-    /* ── Check if 'cal' was typed during recovery window ─────────── */
+    /* ── pending_cal disabled — touch uses Phase 0 factory defaults ─ */
+    #if 0
     if (recovery::pending_cal()) {
         Serial.println("[main] Pending cal — entering calibrate::launch()");
         calibrate::launch();
         Serial.printf("[main] calibrate::launch() returned: active=%p\n", (void*)lv_scr_act());
     }
+    #endif
 }
 
 /* ── Dispatch a complete serial command line ─────────────────────── */
 static void dispatch_serial_cmd(const String& cmd) {
     if (cmd.equalsIgnoreCase("cal")) {
-        Serial.println("[main] Launching touch calibration...");
-        calibrate::launch();
+        Serial.println("[main] 'cal' is disabled — touch uses factory defaults");
     } else if (cmd.equalsIgnoreCase("tdbg")) {
         bool next = !touch::get_debug();
         touch::set_debug(next);

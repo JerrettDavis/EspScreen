@@ -1,17 +1,13 @@
 #include "settings.h"
 #include "../../os/screen_router.h"
 #include "../../ui/widgets.h"
-#include "../../hal/touch.h"
+#include "../../os/logger.h"
 #include <lvgl.h>
 
 namespace settings {
 
 static void back_cb(lv_event_t* e) {
     screen_router::pop();
-}
-
-static void recal_cb(lv_event_t* e) {
-    touch::run_calibration();
 }
 
 lv_obj_t* create_screen() {
@@ -23,13 +19,10 @@ lv_obj_t* create_screen() {
     lv_obj_set_style_text_font(title, &lv_font_montserrat_20, 0);
     lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 16);
 
-    lv_obj_t* btn_cal = lv_button_create(scr);
-    lv_obj_set_size(btn_cal, 200, 50);
-    lv_obj_align(btn_cal, LV_ALIGN_TOP_MID, 0, 70);
-    lv_obj_add_event_cb(btn_cal, recal_cb, LV_EVENT_CLICKED, NULL);
-    lv_obj_t* lbl_cal = lv_label_create(btn_cal);
-    lv_label_set_text(lbl_cal, "Recalibrate Touch");
-    lv_obj_center(lbl_cal);
+    lv_obj_t* info_lbl = lv_label_create(scr);
+    lv_label_set_text(info_lbl, "Touch: factory cal (Phase 0)");
+    lv_obj_set_style_text_color(info_lbl, lv_color_hex(0x888888), 0);
+    lv_obj_align(info_lbl, LV_ALIGN_TOP_MID, 0, 70);
 
     widgets::make_back_btn(scr, back_cb);
     return scr;
