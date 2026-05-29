@@ -51,6 +51,7 @@
 #define LV_USE_MSGBOX           1
 #define LV_USE_TEXTAREA         1
 #define LV_USE_KEYBOARD         1
+#define LV_USE_BAR              1   /* utilization bars in claude_widget */
 
 /* ── Widgets: disabled (reduce flash ~40 KB) ─────────────────────────  */
 /* NOTE: LV_USE_SPINNER depends on LV_USE_ARC. Disable both together.   */
