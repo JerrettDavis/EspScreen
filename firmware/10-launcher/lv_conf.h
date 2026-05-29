@@ -54,7 +54,8 @@
 
 /* ── Widgets: disabled (reduce flash ~40 KB) ─────────────────────────  */
 /* NOTE: LV_USE_SPINNER depends on LV_USE_ARC. Disable both together.   */
-#define LV_USE_ARC              0
+/* ARC enabled for hold-to-settle calibration ring (calibrate.cpp)      */
+#define LV_USE_ARC              1
 #define LV_USE_SPINNER          0
 #define LV_USE_CHART            0
 #define LV_USE_TABLE            0

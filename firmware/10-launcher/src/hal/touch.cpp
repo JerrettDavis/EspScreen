@@ -35,6 +35,9 @@ static const int32_t kDefaultYMax = 3532;
 /* ── Calibration state ───────────────────────────────────────────── */
 static int32_t s_x_min, s_x_max, s_y_min, s_y_max;
 
+/* ── Goal 1: debug logging flag ──────────────────────────────────── */
+static bool s_debug_touch = false;
+
 /**
  * Validate a set of calibration values.
  * Returns false if any value is out of range or the set is clearly degenerate.
@@ -53,6 +56,10 @@ static void touch_read_cb(lv_indev_t* indev, lv_indev_data_t* data) {
     uint16_t raw_x = 0, raw_y = 0;
     bool touched = tft->getTouch(&raw_x, &raw_y);
 
+    /* Statics for debug throttle / edge detection */
+    static uint32_t s_last_dbg_ms = 0;
+    static bool     s_dbg_pressed  = false;
+
     if (touched) {
         /* Affine map raw ADC → screen pixels */
         int32_t mx = ((int32_t)raw_x - s_x_min) * 320 / (s_x_max - s_x_min);
@@ -67,8 +74,25 @@ static void touch_read_cb(lv_indev_t* indev, lv_indev_data_t* data) {
         data->point.x = (lv_coord_t)mx;
         data->point.y = (lv_coord_t)my;
         data->state   = LV_INDEV_STATE_PRESSED;
+
+        /* Goal 1: debug logging, throttled to ≤10 Hz (100 ms gate) */
+        if (s_debug_touch) {
+            uint32_t now = millis();
+            if (now - s_last_dbg_ms >= 100) {
+                s_last_dbg_ms = now;
+                Serial.printf("[touch D] raw=(%u,%u) mapped=(%ld,%ld) pressed=Y\n",
+                              raw_x, raw_y, (long)mx, (long)my);
+            }
+            s_dbg_pressed = true;
+        }
     } else {
         data->state = LV_INDEV_STATE_RELEASED;
+
+        /* Log one release edge when debug is active */
+        if (s_debug_touch && s_dbg_pressed) {
+            Serial.println("[touch D] raw=(--,--) mapped=(--,--) pressed=N");
+            s_dbg_pressed = false;
+        }
     }
 }
 
@@ -187,6 +211,28 @@ void touch::run_calibration() {
 
 namespace touch {
 
+/* ── Goal 1: debug toggle ────────────────────────────────────────── */
+
+void set_debug(bool enabled) {
+    s_debug_touch = enabled;
+    Serial.printf("[touch] Debug logging %s\n", enabled ? "ENABLED" : "DISABLED");
+}
+
+bool get_debug() {
+    return s_debug_touch;
+}
+
+/* ── Hot-reload calibration values ──────────────────────────────── */
+
+void apply_cal(int32_t x_min, int32_t x_max, int32_t y_min, int32_t y_max) {
+    s_x_min = x_min;
+    s_x_max = x_max;
+    s_y_min = y_min;
+    s_y_max = y_max;
+    LOG_I("touch", "Cal applied (hot): x[%ld..%ld] y[%ld..%ld]",
+          (long)s_x_min, (long)s_x_max, (long)s_y_min, (long)s_y_max);
+}
+
 void init() {
     /* Goal 1: Default to Phase 0 hardcoded cal values; do NOT auto-run
      * calibration on first boot.  If NVS has valid cal values, use them.
@@ -220,6 +266,8 @@ void init() {
         s_y_min = kDefaultYMin; s_y_max = kDefaultYMax;
         LOG_I("touch", "No NVS cal — using Phase 0 defaults x[%ld..%ld] y[%ld..%ld]",
               (long)s_x_min, (long)s_x_max, (long)s_y_min, (long)s_y_max);
+        /* Goal 4: prompt user to calibrate without blocking boot */
+        Serial.println("[touch] No cal in NVS. Type 'cal' to calibrate, or any tap will use Phase 0 defaults.");
     }
 
     /* Register LVGL input device */

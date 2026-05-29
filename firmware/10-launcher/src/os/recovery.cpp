@@ -2,6 +2,10 @@
 #include <Arduino.h>
 #include <LittleFS.h>
 #include <nvs_flash.h>
+#include <esp_attr.h>   /* RTC_DATA_ATTR */
+
+/* ── RTC RAM flag survives soft-reset, cleared by power cycle ────── */
+RTC_DATA_ATTR static int s_pending_cal = 0;
 
 /**
  * recovery.cpp — hardware-free factory reset hatches.
@@ -48,7 +52,9 @@ void check() {
     /* ── Print recovery banner ───────────────────────────────────── */
     Serial.println("================================================");
     Serial.println("EspScreen " ESPSCREEN_VERSION " — Recovery window: 5s");
-    Serial.println("Hold BOOT button OR type 'reset' to factory-reset");
+    Serial.println("  'reset' — factory reset (wipes NVS + FS)");
+    Serial.println("  'cal'   — launch touch calibration after boot");
+    Serial.println("  Hold BOOT button 3s — factory reset");
     Serial.println("================================================");
 
     /* ── Configure GPIO0 with internal pullup ───────────────────── */
@@ -82,7 +88,7 @@ void check() {
             gpio_low_start = 0;
         }
 
-        /* ── Hatch B: Serial "reset" command ─────────────────────── */
+        /* ── Hatch B/C: Serial commands ─────────────────────────── */
         while (Serial.available()) {
             char c = (char)Serial.read();
             if (c == '\n' || c == '\r') {
@@ -91,6 +97,9 @@ void check() {
                     Serial.println("[recovery] Serial 'reset' received — triggering factory reset");
                     factory_reset();
                     /* Never returns */
+                } else if (serial_buf.equalsIgnoreCase("cal")) {
+                    s_pending_cal = 1;
+                    Serial.println("[recovery] Cal requested — will launch after LVGL init");
                 }
                 serial_buf = "";
             } else {
@@ -102,6 +111,18 @@ void check() {
     }
 
     Serial.println("[recovery] Recovery window closed — booting normally");
+}
+
+bool pending_cal() {
+    if (s_pending_cal) {
+        s_pending_cal = 0;
+        return true;
+    }
+    return false;
+}
+
+void request_cal() {
+    s_pending_cal = 1;
 }
 
 } // namespace recovery

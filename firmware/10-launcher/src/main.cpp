@@ -20,6 +20,10 @@
 #include "os/screen_router.h"
 #include "ui/theme.h"
 #include "app/builtin/launcher.h"
+#include "app/builtin/calibrate.h"
+
+/* ── Non-blocking serial command reader ─────────────────────────── */
+static String s_serial_buf;
 
 /* ── Stage-gate defines ─────────────────────────────────────────────
  * Comment/uncomment to enable each stage incrementally during dev.
@@ -68,6 +72,40 @@ void setup() {
     lv_scr_load(home);  // immediate load (no animation on first screen)
 
     LOG_I("main", "UI ready. Free heap=%lu", (unsigned long)esp_get_free_heap_size());
+
+    /* ── Serial command help banner ──────────────────────────────── */
+    Serial.println("[main] Serial commands: cal | tdbg | info | reset");
+
+    /* ── Check if 'cal' was typed during recovery window ─────────── */
+    if (recovery::pending_cal()) {
+        Serial.println("[main] Pending cal request — launching calibration");
+        calibrate::launch();
+    }
+}
+
+/* ── Dispatch a complete serial command line ─────────────────────── */
+static void dispatch_serial_cmd(const String& cmd) {
+    if (cmd.equalsIgnoreCase("cal")) {
+        Serial.println("[main] Launching touch calibration...");
+        calibrate::launch();
+    } else if (cmd.equalsIgnoreCase("tdbg")) {
+        bool next = !touch::get_debug();
+        touch::set_debug(next);
+        /* feedback already printed by set_debug() */
+    } else if (cmd.equalsIgnoreCase("info")) {
+        Serial.printf("[main] Free heap: %lu  Min free heap: %lu\n",
+                      (unsigned long)esp_get_free_heap_size(),
+                      (unsigned long)esp_get_minimum_free_heap_size());
+        Serial.printf("[main] Uptime: %lu ms\n", (unsigned long)millis());
+        Serial.printf("[main] Touch debug: %s\n", touch::get_debug() ? "ON" : "OFF");
+    } else if (cmd.equalsIgnoreCase("reset")) {
+        Serial.println("[main] Resetting via serial command...");
+        delay(100);
+        ESP.restart();
+    } else {
+        Serial.printf("[main] Unknown command: '%s'\n", cmd.c_str());
+        Serial.println("[main] Commands: cal | tdbg | info | reset");
+    }
 }
 
 void loop() {
@@ -75,5 +113,20 @@ void loop() {
      * 5 ms delay keeps ~200 Hz polling, well above the 60 Hz refresh.
      */
     lv_timer_handler();
+
+    /* ── Non-blocking serial command reader ─────────────────────── */
+    while (Serial.available()) {
+        char c = (char)Serial.read();
+        if (c == '\n' || c == '\r') {
+            s_serial_buf.trim();
+            if (s_serial_buf.length() > 0) {
+                dispatch_serial_cmd(s_serial_buf);
+            }
+            s_serial_buf = "";
+        } else {
+            s_serial_buf += c;
+        }
+    }
+
     delay(5);
 }
