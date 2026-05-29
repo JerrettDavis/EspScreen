@@ -8,6 +8,23 @@
  *
  * Build/flash: pio run -t upload  (COM20)
  * Monitor:     pio device monitor  (115200 baud)
+ *
+ * Serial commands:
+ *   tdbg | info | reset
+ *   wifi add <ssid> <pass>
+ *   wifi remove <ssid>
+ *   wifi list
+ *   wifi prefer <ssid>
+ *   wifi clear
+ *   wifi status
+ *   claude profile add <label>
+ *   claude profile remove <label>
+ *   claude profile list
+ *   claude profile use <label>
+ *   claude token set <label> <access> <refresh> <expires_unix_sec>
+ *   claude poll
+ *   claude get
+ *   claude set <url>  (deprecated no-op)
  */
 
 #include <Arduino.h>
@@ -18,20 +35,18 @@
 #include "os/config.h"
 #include "os/recovery.h"
 #include "os/screen_router.h"
-#include "os/wifi_mgr.h"
+#include "os/wifi_profiles.h"
+#include "os/claude_auth.h"
 #include "os/nvs_store.h"
 #include "ui/theme.h"
 #include "app/builtin/launcher.h"
 #include "app/builtin/claude_widget.h"
-// calibrate.h intentionally excluded — cal is disabled (touch uses factory defaults)
 
 /* ── Non-blocking serial command reader ─────────────────────────── */
 static String s_serial_buf;
 
 /* ── Stage-gate defines ─────────────────────────────────────────────
  * Comment/uncomment to enable each stage incrementally during dev.
- * Stage 1a ships with all three active; they are no-ops until their
- * respective .cpp files are fully wired up.
  */
 #define STAGE_1A_DISPLAY   1
 #define STAGE_1B_TOUCH     1
@@ -39,17 +54,14 @@ static String s_serial_buf;
 
 void setup() {
     Serial.begin(115200);
-    delay(100);  // let serial settle enough for recovery banner
+    delay(100);
 
-    /* ── Recovery hatches (FIRST — before LVGL, display, or FS) ─── */
+    /* ── Recovery hatches (FIRST) ────────────────────────────────── */
     recovery::check();
 
     Serial.println("[main] EspScreen " ESPSCREEN_VERSION " starting...");
 
 #if STAGE_1C_CONFIG
-    /* Mount FS and load config BEFORE display init so config-driven
-     * settings (backlight %, rotation) can be applied at init time.
-     */
     logger_init();
     if (!config::mount_fs()) {
         Serial.println("[main E] LittleFS mount failed — using defaults");
@@ -66,55 +78,47 @@ void setup() {
 #endif
 
 #if STAGE_1B_TOUCH
-    touch::init();  // loads NVS cal or uses Phase 0 defaults; no auto-cal
+    touch::init();
 #endif
 
-    /* ── WiFi init (non-blocking — reads NVS credentials) ───────── */
-    wifi_mgr::init();
+    /* ── WiFi init (multi-network, priority-ordered) ─────────────── */
+    wifi_profiles::init();
+
+    /* ── Claude auth init (profile validation) ───────────────────── */
+    claude_auth::init();
 
     /* ── Build and load the launcher screen ─────────────────────── */
     lv_obj_t* home = launcher::create_screen();
     Serial.printf("[main] launcher created scr=%p\n", (void*)home);
     screen_router::push(home);
     Serial.printf("[main] after router push(home): active=%p\n", (void*)lv_scr_act());
-    lv_scr_load(home);  // immediate load (no animation on first screen)
+    lv_scr_load(home);
     Serial.printf("[main] after lv_scr_load(home): active=%p\n", (void*)lv_scr_act());
 
     LOG_I("main", "UI ready. Free heap=%lu", (unsigned long)esp_get_free_heap_size());
 
-    /* ── Serial command help banner ──────────────────────────────── */
-    Serial.println("[main] Serial commands: tdbg | info | reset | wifi set/clear/status | claude set/get/poll");
-
-    /* ── pending_cal disabled — touch uses Phase 0 factory defaults ─ */
-    #if 0
-    if (recovery::pending_cal()) {
-        Serial.println("[main] Pending cal — entering calibrate::launch()");
-        calibrate::launch();
-        Serial.printf("[main] calibrate::launch() returned: active=%p\n", (void*)lv_scr_act());
-    }
-    #endif
+    Serial.println("[main] Serial commands: tdbg | info | reset");
+    Serial.println("[main]   wifi: add | remove | list | prefer | clear | status");
+    Serial.println("[main]   claude: profile add/remove/list/use | token set | poll | get");
 }
 
 /* ── Quote-aware argument splitter ──────────────────────────────────
  * Splits "verb arg1 arg2" respecting double-quoted tokens.
- * e.g. 'wifi set "my ssid" "pass word"' → ["wifi","set","my ssid","pass word"]
+ * e.g. 'wifi add "my ssid" "pass word"' → ["wifi","add","my ssid","pass word"]
  */
 static void split_args(const String& line, String* argv, int max_argc, int* out_argc) {
     *out_argc = 0;
     int i = 0;
     int n = line.length();
     while (i < n && *out_argc < max_argc) {
-        /* skip whitespace */
         while (i < n && line[i] == ' ') i++;
         if (i >= n) break;
         String token = "";
         if (line[i] == '"') {
-            /* quoted token */
             i++;
             while (i < n && line[i] != '"') token += line[i++];
-            if (i < n) i++;  // skip closing quote
+            if (i < n) i++;
         } else {
-            /* unquoted token */
             while (i < n && line[i] != ' ') token += line[i++];
         }
         argv[(*out_argc)++] = token;
@@ -123,7 +127,7 @@ static void split_args(const String& line, String* argv, int max_argc, int* out_
 
 /* ── Dispatch a complete serial command line ─────────────────────── */
 static void dispatch_serial_cmd(const String& cmd) {
-    static const int MAX_ARGS = 6;
+    static const int MAX_ARGS = 7;
     String argv[MAX_ARGS];
     int argc = 0;
     split_args(cmd, argv, MAX_ARGS, &argc);
@@ -139,6 +143,7 @@ static void dispatch_serial_cmd(const String& cmd) {
     } else if (verb == "tdbg") {
         bool next = !touch::get_debug();
         touch::set_debug(next);
+        Serial.printf("[main] touch debug: %s\n", next ? "ON" : "OFF");
 
     } else if (verb == "info") {
         Serial.printf("[main] Free heap: %lu  Min free heap: %lu\n",
@@ -155,92 +160,248 @@ static void dispatch_serial_cmd(const String& cmd) {
     /* ── WiFi commands ────────────────────────────────────────────── */
     } else if (verb == "wifi") {
         if (argc < 2) {
-            Serial.println("[wifi] Usage: wifi set <ssid> <pass> | wifi clear | wifi status");
+            Serial.println("[wifi] Usage: wifi <add|remove|list|prefer|clear|status>");
             return;
         }
         String sub = argv[1];
         sub.toLowerCase();
 
-        if (sub == "set") {
+        if (sub == "add") {
             if (argc < 4) {
-                Serial.println("[wifi] Usage: wifi set <ssid> <pass>");
-                Serial.println("[wifi] Tip:   wifi set \"ssid with spaces\" \"pass word\"");
+                Serial.println("[wifi] Usage: wifi add <ssid> <pass>");
+                Serial.println("[wifi] Tip:   wifi add \"ssid with spaces\" \"pass word\"");
                 return;
             }
-            wifi_mgr::set_credentials(argv[2].c_str(), argv[3].c_str());
-            Serial.println("[wifi] Credentials saved. Reconnecting...");
-            wifi_mgr::init();
+            uint8_t idx = wifi_profiles::add_network(argv[2].c_str(), argv[3].c_str());
+            if (idx == 255) {
+                Serial.println("[wifi] Error: could not add network (max 4 reached?)");
+            } else {
+                Serial.printf("[wifi] Network added: index=%u ssid=%s\n", idx, argv[2].c_str());
+            }
+
+        } else if (sub == "remove") {
+            if (argc < 3) {
+                Serial.println("[wifi] Usage: wifi remove <ssid>");
+                return;
+            }
+            if (wifi_profiles::remove_network(argv[2].c_str())) {
+                Serial.printf("[wifi] Removed: %s\n", argv[2].c_str());
+            } else {
+                Serial.printf("[wifi] Not found: %s\n", argv[2].c_str());
+            }
+
+        } else if (sub == "list") {
+            uint8_t count = wifi_profiles::network_count();
+            if (count == 0) {
+                Serial.println("[wifi] No networks configured");
+                return;
+            }
+            String cur = wifi_profiles::get_ssid();
+            for (uint8_t i = 0; i < count; i++) {
+                wifi_profiles::Network net;
+                if (!wifi_profiles::load_network(i, net)) continue;
+                bool connected = wifi_profiles::is_connected() &&
+                                 cur.equalsIgnoreCase(net.ssid);
+                Serial.printf("[wifi] %u: %s (prio=%u)%s\n",
+                              i, net.ssid, net.prio,
+                              connected ? " [connected]" : "");
+            }
+
+        } else if (sub == "prefer") {
+            if (argc < 3) {
+                Serial.println("[wifi] Usage: wifi prefer <ssid>");
+                return;
+            }
+            if (wifi_profiles::prefer_network(argv[2].c_str())) {
+                Serial.printf("[wifi] %s set to highest priority\n", argv[2].c_str());
+            } else {
+                Serial.printf("[wifi] Not found: %s\n", argv[2].c_str());
+            }
 
         } else if (sub == "clear") {
-            wifi_mgr::clear_credentials();
-            Serial.println("[wifi] Credentials cleared");
+            wifi_profiles::clear_all();
+            Serial.println("[wifi] All networks cleared, WiFi disconnected");
 
         } else if (sub == "status") {
-            if (wifi_mgr::is_connected()) {
+            if (wifi_profiles::is_connected()) {
                 Serial.printf("[wifi] Connected  ssid=%s  rssi=%d dBm  ip=%s\n",
-                              wifi_mgr::get_ssid().c_str(),
-                              wifi_mgr::get_rssi(),
-                              wifi_mgr::get_ip().c_str());
+                              wifi_profiles::get_ssid().c_str(),
+                              wifi_profiles::get_rssi(),
+                              wifi_profiles::get_ip().c_str());
             } else {
-                String ssid = wifi_mgr::get_ssid();
-                Serial.printf("[wifi] Disconnected  ssid=%s (stored)\n",
-                              ssid.isEmpty() ? "(none)" : ssid.c_str());
+                Serial.printf("[wifi] Disconnected  (stored networks: %u)\n",
+                              wifi_profiles::network_count());
             }
+
+        } else if (sub == "set") {
+            /* Legacy command — redirect to 'wifi add' */
+            if (argc < 4) {
+                Serial.println("[wifi] 'wifi set' is deprecated. Use: wifi add <ssid> <pass>");
+                return;
+            }
+            Serial.println("[wifi] Note: 'wifi set' is deprecated, use 'wifi add' for multi-network support");
+            uint8_t idx = wifi_profiles::add_network(argv[2].c_str(), argv[3].c_str());
+            if (idx != 255) {
+                Serial.printf("[wifi] Network added at index %u\n", idx);
+            }
+
         } else {
             Serial.printf("[wifi] Unknown subcommand: '%s'\n", sub.c_str());
+            Serial.println("[wifi] Subcommands: add | remove | list | prefer | clear | status");
         }
 
-    /* ── Claude endpoint commands ─────────────────────────────────── */
+    /* ── Claude commands ─────────────────────────────────────────── */
     } else if (verb == "claude") {
         if (argc < 2) {
-            Serial.println("[claude] Usage: claude set <url> | claude get | claude poll");
+            Serial.println("[claude] Usage: claude <profile|token|poll|get|set>");
             return;
         }
         String sub = argv[1];
         sub.toLowerCase();
 
-        if (sub == "set") {
+        /* ── claude profile ... ─────────────────────────────────── */
+        if (sub == "profile") {
             if (argc < 3) {
-                Serial.println("[claude] Usage: claude set <url>");
-                Serial.println("[claude] Example: claude set http://192.168.1.100:8766/status.json");
+                Serial.println("[claude] Usage: claude profile <add|remove|list|use> [<label>]");
                 return;
             }
-            nvs_store::put_str("claude", "endpoint", argv[2].c_str());
-            Serial.printf("[claude] Endpoint saved: %s\n", argv[2].c_str());
+            String psub = argv[2];
+            psub.toLowerCase();
 
-        } else if (sub == "get") {
-            String url = nvs_store::get_str("claude", "endpoint", "");
-            if (url.isEmpty()) {
-                Serial.println("[claude] No endpoint configured");
+            if (psub == "add") {
+                if (argc < 4) {
+                    Serial.println("[claude] Usage: claude profile add <label>");
+                    return;
+                }
+                uint8_t idx = claude_auth::add_profile(argv[3].c_str());
+                if (idx == 255) {
+                    Serial.printf("[claude] Error: could not add profile '%s' (duplicate or max reached)\n",
+                                  argv[3].c_str());
+                } else {
+                    Serial.printf("[claude] Profile added: index=%u label=%s\n",
+                                  idx, argv[3].c_str());
+                }
+
+            } else if (psub == "remove") {
+                if (argc < 4) {
+                    Serial.println("[claude] Usage: claude profile remove <label>");
+                    return;
+                }
+                uint8_t idx = claude_auth::find_by_label(argv[3].c_str());
+                if (idx == 255) {
+                    Serial.printf("[claude] Not found: '%s'\n", argv[3].c_str());
+                } else if (claude_auth::remove_profile(idx)) {
+                    Serial.printf("[claude] Removed profile: %s\n", argv[3].c_str());
+                } else {
+                    Serial.printf("[claude] Error removing profile: %s\n", argv[3].c_str());
+                }
+
+            } else if (psub == "list") {
+                uint8_t count = claude_auth::profile_count();
+                uint8_t active = claude_auth::active_index();
+                if (count == 0) {
+                    Serial.println("[claude] No profiles configured");
+                    return;
+                }
+                for (uint8_t i = 0; i < count; i++) {
+                    claude_auth::Profile p;
+                    if (!claude_auth::load_profile(i, p)) continue;
+                    bool has_token = (p.access[0] != '\0');
+                    Serial.printf("[claude] %s%u: %s %s\n",
+                                  (i == active) ? "*" : " ",
+                                  i, p.label,
+                                  has_token ? "[token set]" : "[NO TOKEN]");
+                }
+
+            } else if (psub == "use") {
+                if (argc < 4) {
+                    Serial.println("[claude] Usage: claude profile use <label>");
+                    return;
+                }
+                uint8_t idx = claude_auth::find_by_label(argv[3].c_str());
+                if (idx == 255) {
+                    Serial.printf("[claude] Not found: '%s'\n", argv[3].c_str());
+                } else if (claude_auth::set_active(idx)) {
+                    Serial.printf("[claude] Active profile: %s (index=%u)\n",
+                                  argv[3].c_str(), idx);
+                }
             } else {
-                Serial.printf("[claude] Endpoint: %s\n", url.c_str());
+                Serial.printf("[claude] Unknown profile subcommand: '%s'\n", psub.c_str());
             }
 
+        /* ── claude token set <label> <access> <refresh> <expires_sec> ── */
+        } else if (sub == "token") {
+            if (argc < 3) {
+                Serial.println("[claude] Usage: claude token set <label> <access> <refresh> <expires_unix_sec>");
+                return;
+            }
+            String tsub = argv[2];
+            tsub.toLowerCase();
+
+            if (tsub == "set") {
+                if (argc < 7) {
+                    Serial.println("[claude] Usage: claude token set <label> <access> <refresh> <expires_unix_sec>");
+                    Serial.println("[claude] Note:  expires_unix_sec from credentials.json expiresAt (÷1000 if in ms)");
+                    Serial.println("[claude]        Pass 0 if unknown (assumes +1 hour).");
+                    return;
+                }
+                uint8_t idx = claude_auth::find_by_label(argv[3].c_str());
+                if (idx == 255) {
+                    Serial.printf("[claude] Profile not found: '%s'\n", argv[3].c_str());
+                    return;
+                }
+                int64_t expires = (int64_t)argv[6].toInt();
+                if (claude_auth::set_tokens(idx, argv[4].c_str(), argv[5].c_str(), expires)) {
+                    Serial.printf("[claude] Tokens set for profile '%s' (index=%u)\n",
+                                  argv[3].c_str(), idx);
+                } else {
+                    Serial.printf("[claude] Error setting tokens for profile '%s'\n", argv[3].c_str());
+                }
+            } else {
+                Serial.printf("[claude] Unknown token subcommand: '%s'\n", tsub.c_str());
+            }
+
+        /* ── claude poll ─────────────────────────────────────────── */
         } else if (sub == "poll") {
             Serial.println("[claude] Forcing immediate poll...");
             claude_widget::poll_now();
 
+        /* ── claude get ──────────────────────────────────────────── */
+        } else if (sub == "get") {
+            String label = claude_auth::get_active_label();
+            uint8_t count = claude_auth::profile_count();
+            Serial.printf("[claude] Active profile: %s  (%u profiles total)\n",
+                          label.c_str(), count);
+            Serial.printf("[claude] Endpoint: %s\n",
+                          "https://api.anthropic.com/api/oauth/usage (hardcoded)");
+            bool expired = claude_auth::is_token_expired();
+            Serial.printf("[claude] Token status: %s\n",
+                          expired ? "EXPIRED" : "valid (or unknown)");
+
+        /* ── claude set <url>  — deprecated ──────────────────────── */
+        } else if (sub == "set") {
+            Serial.println("[claude] WARNING: 'claude set' is deprecated and is now a no-op.");
+            Serial.println("[claude] The endpoint is hardcoded to https://api.anthropic.com/api/oauth/usage");
+            Serial.println("[claude] Use 'claude profile add' and 'claude token set' instead.");
+
         } else {
             Serial.printf("[claude] Unknown subcommand: '%s'\n", sub.c_str());
+            Serial.println("[claude] Subcommands: profile | token | poll | get | set(deprecated)");
         }
 
     } else {
         Serial.printf("[main] Unknown command: '%s'\n", cmd.c_str());
-        Serial.println("[main] Commands: cal | tdbg | info | reset | wifi set/clear/status | claude set/get/poll");
+        Serial.println("[main] Commands: cal | tdbg | info | reset | wifi | claude");
     }
 }
 
-/* Track active screen pointer across loop iterations to detect rogue swaps */
+/* Track active screen pointer across loop iterations */
 static lv_obj_t* s_last_active_scr = nullptr;
 static int s_loop_count = 0;
 
 void loop() {
-    /* LVGL task handler — must be called regularly.
-     * 5 ms delay keeps ~200 Hz polling, well above the 60 Hz refresh.
-     */
     lv_timer_handler();
 
-    /* Diagnostic: log any screen change for first 100 loop iterations */
     if (s_loop_count < 100) {
         s_loop_count++;
         lv_obj_t* cur = lv_scr_act();
