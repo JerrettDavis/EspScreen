@@ -475,6 +475,8 @@ void launch() {
 
     s_scr = build_screen();
     screen_router::push(s_scr);
+    lv_scr_load(s_scr);   /* force-active immediately — no animation gap where
+                            * the launcher can receive a spurious startup touch */
 
     set_title(0);
     set_status("Hold steady...");
@@ -482,7 +484,8 @@ void launch() {
     /* LVGL timer drives the sampling loop — avoids blocking the main loop */
     s_timer = lv_timer_create(cal_timer_cb, SAMPLE_INTERVAL_MS, nullptr);
 
-    LOG_I("cal", "Hold-to-settle calibration started");
+    LOG_I("cal", "Screen created — corner 0/4 (TL) — hold-to-settle calibration started");
+    Serial.println("[cal] Screen created — corner 0/4 (TL)");
     Serial.println("[cal] Calibration started. Hold stylus on each crosshair until the ring fills.");
 }
 
