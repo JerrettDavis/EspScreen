@@ -1,0 +1,17 @@
+{
+  "name": "espscreen-provision",
+  "version": "1.0.0",
+  "description": "One-shot provisioning script — push Claude OAuth credentials to EspScreen ESP32 over USB serial",
+  "type": "module",
+  "main": "provision.js",
+  "scripts": {
+    "provision": "node provision.js",
+    "list": "node provision.js --list-ports"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "serialport": "^13.0.0"
+  }
+}
