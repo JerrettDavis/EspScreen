@@ -54,9 +54,9 @@ static const char* kCornerNames[4] = {
 /* ── Sampling parameters ─────────────────────────────────────────── */
 #define SAMPLE_HZ          30        /* samples per second            */
 #define SAMPLE_INTERVAL_MS 33        /* 1000/30 ≈ 33 ms               */
-#define WINDOW_SIZE        30        /* sliding window length          */
-#define STABLE_CYCLES      30        /* consecutive stable cycles req. */
-#define STDDEV_THRESHOLD   15.0f     /* ADC counts                     */
+#define WINDOW_SIZE        20        /* sliding window length (was 30) */
+#define STABLE_CYCLES      15        /* consecutive stable cycles req. (was 30) */
+#define STDDEV_THRESHOLD   30.0f     /* ADC counts (was 15.0 — XPT2046 is noisy) */
 #define TIMEOUT_MS         30000     /* abandon if no touch for 30 s   */
 
 /* ── LVGL widget handles ─────────────────────────────────────────── */
@@ -171,11 +171,18 @@ static void cal_timer_cb(lv_timer_t* timer) {
     if (touched) {
         s_last_touch_ms = now;
     } else if (now - s_last_touch_ms > TIMEOUT_MS) {
+        Serial.printf("[cal] Corner %d TIMEOUT after 30s — aborting\n", s_corner);
         abort_calibration("Timeout — no touch detected");
         return;
     }
 
     if (touched) {
+        /* Log first touch on this corner */
+        if (!s_was_touched && s_win_count == 0) {
+            Serial.printf("[cal] Corner %d (%s): start sampling\n",
+                          s_corner, kCornerNames[s_corner]);
+        }
+
         /* Rate-limit sampling */
         if (now - s_last_sample_ms < SAMPLE_INTERVAL_MS) return;
         s_last_sample_ms = now;
@@ -202,12 +209,30 @@ static void cal_timer_cb(lv_timer_t* timer) {
             snprintf(buf, sizeof(buf), "Sampling: %d/%d", s_win_count, WINDOW_SIZE);
             set_status(buf);
         } else {
+            /* Log window-full event once (when count first hits WINDOW_SIZE) */
+            static int s_last_logged_full_corner = -1;
+            if (s_last_logged_full_corner != s_corner) {
+                s_last_logged_full_corner = s_corner;
+                Serial.printf("[cal] Corner %d: window full, mean=(%.0f,%.0f) stddev=(%.1f,%.1f)\n",
+                              s_corner, mx, my, sx, sy);
+            }
+
             /* Phase 2: window full, check stability */
             bool stable = (sx < STDDEV_THRESHOLD && sy < STDDEV_THRESHOLD);
             if (stable) {
                 s_stable_count++;
+                /* Log every 5 stable cycles, not every cycle */
+                if (s_stable_count % 5 == 0) {
+                    Serial.printf("[cal] Corner %d: stable cycle %d/%d (stddev=(%.1f,%.1f))\n",
+                                  s_corner, s_stable_count, STABLE_CYCLES, sx, sy);
+                }
             } else {
                 /* Spike — decay arc back to 50% and reset stability counter */
+                if (s_stable_count > 0) {
+                    /* Only log resets, not every unstable sample from scratch */
+                    Serial.printf("[cal] Corner %d: stability lost (stddev=(%.1f,%.1f)) — counter reset from %d\n",
+                                  s_corner, sx, sy, s_stable_count);
+                }
                 s_stable_count = 0;
                 set_arc(50);
                 char buf[64];
@@ -225,6 +250,8 @@ static void cal_timer_cb(lv_timer_t* timer) {
                 s_corner_x[s_corner] = (int32_t)mx;
                 s_corner_y[s_corner] = (int32_t)my;
 
+                Serial.printf("[cal] Corner %d CONFIRMED: raw=(%.0f,%.0f) stddev=(%.1f,%.1f)\n",
+                              s_corner, mx, my, sx, sy);
                 LOG_I("cal", "Corner %d (%s): raw mean (%ld, %ld) stddev (%.1f, %.1f)",
                       s_corner, kCornerNames[s_corner],
                       (long)s_corner_x[s_corner], (long)s_corner_y[s_corner], sx, sy);
@@ -290,26 +317,63 @@ static void finish_calibration() {
     s_cal_running = false;
     if (s_timer) { lv_timer_delete(s_timer); s_timer = nullptr; }
 
+    /* Dump all raw corner values */
+    Serial.printf("[cal] TL=(%ld,%ld) TR=(%ld,%ld) BR=(%ld,%ld) BL=(%ld,%ld)\n",
+                  (long)s_corner_x[0], (long)s_corner_y[0],
+                  (long)s_corner_x[1], (long)s_corner_y[1],
+                  (long)s_corner_x[2], (long)s_corner_y[2],
+                  (long)s_corner_x[3], (long)s_corner_y[3]);
+
+    /* Orientation sanity: TL.x should be < TR.x, TL.y should be < BL.y */
+    Serial.printf("[cal] orient check: TL.x=%ld TR.x=%ld (expect TL<TR); TL.y=%ld BL.y=%ld (expect TL<BL)\n",
+                  (long)s_corner_x[0], (long)s_corner_x[1],
+                  (long)s_corner_y[0], (long)s_corner_y[3]);
+    if (s_corner_x[0] > s_corner_x[1]) {
+        Serial.println("[cal] WARN: X axis appears FLIPPED — TL.x > TR.x");
+    }
+    if (s_corner_y[0] > s_corner_y[3]) {
+        Serial.println("[cal] WARN: Y axis appears FLIPPED — TL.y > BL.y");
+    }
+
     /* Compute affine bounds from 4 corners */
     int32_t x_min = (s_corner_x[0] + s_corner_x[3]) / 2;   /* TL.x + BL.x */
     int32_t x_max = (s_corner_x[1] + s_corner_x[2]) / 2;   /* TR.x + BR.x */
     int32_t y_min = (s_corner_y[0] + s_corner_y[1]) / 2;   /* TL.y + TR.y */
     int32_t y_max = (s_corner_y[3] + s_corner_y[2]) / 2;   /* BL.y + BR.y */
 
+    Serial.printf("[cal] cal_x_min=%ld cal_x_max=%ld cal_y_min=%ld cal_y_max=%ld\n",
+                  (long)x_min, (long)x_max, (long)y_min, (long)y_max);
     LOG_I("cal", "Computed cal: x[%ld..%ld] y[%ld..%ld]",
           (long)x_min, (long)x_max, (long)y_min, (long)y_max);
 
     /* Sanity check 1: min < max */
     if (x_min >= x_max || y_min >= y_max) {
+        Serial.printf("[cal] REJECT: x_min(%ld) >= x_max(%ld) or y_min(%ld) >= y_max(%ld)\n",
+                      (long)x_min, (long)x_max, (long)y_min, (long)y_max);
         abort_calibration("Error: degenerate cal (min >= max)");
         return;
     }
 
-    /* Sanity check 2: values in range */
-    if (x_min < 100 || x_max > 4000 || y_min < 100 || y_max > 4000) {
-        abort_calibration("Error: cal values out of range (100..4000)");
+    /* Sanity check 2: range must be at least 500 ADC counts per axis */
+    int32_t x_range = x_max - x_min;
+    int32_t y_range = y_max - y_min;
+    if (x_range < 500 || y_range < 500) {
+        Serial.printf("[cal] REJECT: range too small — x_range=%ld y_range=%ld (need >=500 each)\n",
+                      (long)x_range, (long)y_range);
+        abort_calibration("Error: cal range too small (<500 ADC counts)");
         return;
     }
+
+    /* Sanity check 3: stuck ADC (exactly 0 or 4095) */
+    if (x_min == 0 || x_max == 4095 || y_min == 0 || y_max == 4095) {
+        Serial.printf("[cal] REJECT: stuck ADC value (0 or 4095) in x[%ld..%ld] y[%ld..%ld]\n",
+                      (long)x_min, (long)x_max, (long)y_min, (long)y_max);
+        abort_calibration("Error: stuck ADC (0 or 4095 detected)");
+        return;
+    }
+
+    /* NOTE: Removed the old 100..4000 outer-bound check — some panels read outside that range */
+    Serial.println("[cal] SAVE: ok — all sanity checks passed");
 
     /* Save to NVS */
     nvs_store::put_i32("touch", "cal_x_min", x_min);
@@ -317,6 +381,7 @@ static void finish_calibration() {
     nvs_store::put_i32("touch", "cal_y_min", y_min);
     nvs_store::put_i32("touch", "cal_y_max", y_max);
     nvs_store::put_u8 ("touch", "calibrated", 1);
+    Serial.println("[cal] NVS write ok");
 
     /* Hot-apply immediately */
     touch::apply_cal(x_min, x_max, y_min, y_max);
@@ -486,6 +551,8 @@ void launch() {
 
     LOG_I("cal", "Screen created — corner 0/4 (TL) — hold-to-settle calibration started");
     Serial.println("[cal] Screen created — corner 0/4 (TL)");
+    Serial.printf("[cal] Thresholds: WINDOW=%d STABLE_CYCLES=%d STDDEV_MAX=%.0f\n",
+                  WINDOW_SIZE, STABLE_CYCLES, STDDEV_THRESHOLD);
     Serial.println("[cal] Calibration started. Hold stylus on each crosshair until the ring fills.");
 }
 
