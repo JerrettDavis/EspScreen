@@ -2,8 +2,9 @@
  * main.cpp — EspScreen Phase 1 entry point
  *
  * Stage 1a: LVGL 9 hello world
- * Stage 1b: adds touch::init() (4-corner cal + NVS)
+ * Stage 1b: adds touch::init() (NVS cal with hardcoded defaults — no auto-cal)
  * Stage 1c: adds config::mount_fs() / config::load_config() + logger
+ * Stage 1b-recovery: GPIO0 + Serial factory-reset hatches before LVGL init
  *
  * Build/flash: pio run -t upload  (COM20)
  * Monitor:     pio device monitor  (115200 baud)
@@ -15,6 +16,7 @@
 #include "hal/touch.h"
 #include "os/logger.h"
 #include "os/config.h"
+#include "os/recovery.h"
 #include "os/screen_router.h"
 #include "ui/theme.h"
 #include "app/builtin/launcher.h"
@@ -30,7 +32,11 @@
 
 void setup() {
     Serial.begin(115200);
-    delay(500);  // let serial settle
+    delay(100);  // let serial settle enough for recovery banner
+
+    /* ── Recovery hatches (FIRST — before LVGL, display, or FS) ─── */
+    recovery::check();
+
     Serial.println("[main] EspScreen " ESPSCREEN_VERSION " starting...");
 
 #if STAGE_1C_CONFIG
@@ -53,7 +59,7 @@ void setup() {
 #endif
 
 #if STAGE_1B_TOUCH
-    touch::init();  // loads cal from NVS; runs 4-corner cal on first boot
+    touch::init();  // loads NVS cal or uses Phase 0 defaults; no auto-cal
 #endif
 
     /* ── Build and load the launcher screen ─────────────────────── */
