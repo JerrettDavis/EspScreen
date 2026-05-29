@@ -254,7 +254,7 @@ static void cal_timer_cb(lv_timer_t* timer) {
 
     TFT_eSPI* tft = display::get_tft();
     uint16_t rx = 0, ry = 0;
-    bool touched = tft->getTouch(&rx, &ry);
+    bool touched = tft->getTouchRaw(&rx, &ry);   /* RAW ADC — independent of NVS affine */
     uint32_t now = millis();
 
     /* Timeout: no touch for TIMEOUT_MS */
@@ -354,9 +354,9 @@ static void cal_timer_cb(lv_timer_t* timer) {
                 lv_refr_now(NULL);
                 delay(300);
 
-                /* Wait for lift */
+                /* Wait for lift — raw API so it works before cal is applied */
                 uint16_t dx, dy;
-                while (tft->getTouch(&dx, &dy)) { delay(10); }
+                while (tft->getTouchRaw(&dx, &dy)) { delay(10); }
 
                 advance_corner();
             } else {
@@ -663,15 +663,15 @@ static void finish_calibration() {
     s_cancel_btn = nullptr;
     s_confirm_box = nullptr;
 
-    /* Wait for any tap using raw getTouch (calibration is now applied) */
+    /* Wait for any tap — use getTouchRaw so no TFT_eSPI internal cal needed */
     TFT_eSPI* tft = display::get_tft();
     uint16_t dx, dy;
     uint32_t wait_start = millis();
-    while (!tft->getTouch(&dx, &dy) && (millis() - wait_start < 15000)) {
+    while (!tft->getTouchRaw(&dx, &dy) && (millis() - wait_start < 15000)) {
         lv_timer_handler();
         delay(20);
     }
-    while (tft->getTouch(&dx, &dy)) { delay(20); }
+    while (tft->getTouchRaw(&dx, &dy)) { delay(20); }
 
     screen_router::pop();
 }
