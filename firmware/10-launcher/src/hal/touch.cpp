@@ -23,7 +23,7 @@
  * 3 = swap + invert X — corrects observed 90° axis swap + X inversion:
  *     tap UP→dot RIGHT, tap DOWN→dot LEFT, tap LEFT→dot UP, tap RIGHT→dot DOWN
  */
-static const uint16_t kCalData[5] = { 275, 3620, 264, 3532, 3 };
+static const uint16_t kCalData[5] = { 275, 3620, 264, 3532, 4 };
 
 /* ── Debug logging flag (toggled by 'tdbg' serial command) ──────── */
 static bool    s_debug_touch  = false;
@@ -63,8 +63,8 @@ void init() {
     /* Apply Phase 0 factory cal — TFT_eSPI maps raw ADC → rotation-aware (x,y) */
     tft->setTouch(const_cast<uint16_t*>(kCalData));
 
-    LOG_I("touch", "init: using TFT_eSPI built-in mapping, cal={275,3620,264,3532,3}");
-    Serial.println("[touch] init: using TFT_eSPI built-in mapping, cal={275,3620,264,3532,3}");
+    LOG_I("touch", "init: using TFT_eSPI built-in mapping, cal={275,3620,264,3532,4}");
+    Serial.println("[touch] init: using TFT_eSPI built-in mapping, cal={275,3620,264,3532,4}");
 
     /* Register LVGL input device */
     lv_indev_t* indev = lv_indev_create();
