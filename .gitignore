@@ -1,0 +1,24 @@
+# PlatformIO
+.pio/
+.vscode/
+
+# Build artifacts
+build/
+*.bin
+*.elf
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Secrets / environment
+tools/keys/
+secrets.json
+*.local.json
+.env
+.env.*
