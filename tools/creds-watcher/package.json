@@ -1,0 +1,17 @@
+{
+  "name": "espscreen-creds-watcher",
+  "version": "1.0.0",
+  "description": "Watches ~/.claude/.credentials.json and pushes new tokens to ESP32 via USB serial or WiFi",
+  "type": "module",
+  "scripts": {
+    "start": "node watch.js",
+    "once": "node watch.js --once"
+  },
+  "dependencies": {
+    "chokidar": "^3.6.0",
+    "serialport": "^12.0.0"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
