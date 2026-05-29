@@ -253,9 +253,16 @@ static void cal_timer_cb(lv_timer_t* timer) {
     if (s_confirm_box) return;
 
     TFT_eSPI* tft = display::get_tft();
-    uint16_t rx = 0, ry = 0;
-    bool touched = tft->getTouchRaw(&rx, &ry);   /* RAW ADC — independent of NVS affine */
     uint32_t now = millis();
+
+    /* Pressure + IRQ gate — reject phantom reads before doing any raw read.
+     * When no stylus is present, Z floats high (~3000+) and PENIRQ stays HIGH.
+     * We treat is_real_touch()==false as "no touch" regardless of getTouchRaw. */
+    bool touched = false;
+    uint16_t rx = 0, ry = 0;
+    if (touch::is_real_touch()) {
+        touched = tft->getTouchRaw(&rx, &ry);
+    }
 
     /* Timeout: no touch for TIMEOUT_MS */
     if (touched) {
@@ -354,9 +361,9 @@ static void cal_timer_cb(lv_timer_t* timer) {
                 lv_refr_now(NULL);
                 delay(300);
 
-                /* Wait for lift — raw API so it works before cal is applied */
+                /* Wait for lift — gate on pressure too so phantom Z doesn't stall us */
                 uint16_t dx, dy;
-                while (tft->getTouchRaw(&dx, &dy)) { delay(10); }
+                while (touch::is_real_touch() && tft->getTouchRaw(&dx, &dy)) { delay(10); }
 
                 advance_corner();
             } else {
@@ -663,15 +670,17 @@ static void finish_calibration() {
     s_cancel_btn = nullptr;
     s_confirm_box = nullptr;
 
-    /* Wait for any tap — use getTouchRaw so no TFT_eSPI internal cal needed */
+    /* Wait for any real tap — gate on pressure so phantom Z doesn't auto-advance */
     TFT_eSPI* tft = display::get_tft();
     uint16_t dx, dy;
     uint32_t wait_start = millis();
-    while (!tft->getTouchRaw(&dx, &dy) && (millis() - wait_start < 15000)) {
+    while (!(touch::is_real_touch() && tft->getTouchRaw(&dx, &dy))
+           && (millis() - wait_start < 15000)) {
         lv_timer_handler();
         delay(20);
     }
-    while (tft->getTouchRaw(&dx, &dy)) { delay(20); }
+    /* Wait for lift */
+    while (touch::is_real_touch() && tft->getTouchRaw(&dx, &dy)) { delay(20); }
 
     screen_router::pop();
 }

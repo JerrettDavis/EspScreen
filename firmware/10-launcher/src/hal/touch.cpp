@@ -51,6 +51,9 @@ static bool    s_axis_swap = false;
 /* ── Goal 1: debug logging flag ──────────────────────────────────── */
 static bool s_debug_touch = false;
 
+/* ── Pressure / IRQ gating ───────────────────────────────────────── */
+constexpr int TOUCH_IRQ_PIN = 36;   /* XPT2046 PENIRQ — active LOW when touched */
+
 /**
  * Validate a set of calibration values (signed-delta model).
  * x_at_left / x_at_right and y_at_top / y_at_bottom can be in either order
@@ -68,15 +71,49 @@ static bool cal_values_valid(int32_t x_at_left, int32_t x_at_right,
     return true;
 }
 
+/* ── Pressure + IRQ gate ─────────────────────────────────────────── */
+/**
+ * Returns true only when the XPT2046 is confirming a real physical touch:
+ *   1. GPIO36 (PENIRQ) must be LOW — the chip drives it LOW when touched.
+ *      (Input-only pin, no internal pull-up; external pull-up on XPT2046 board.)
+ *   2. Z-pressure channel must read below 600 ADC counts.  When no stylus is
+ *      present the Z channel floats high (~3000+).  Real touches are typically
+ *      100–500.  600 is a conservative threshold that leaves headroom for
+ *      stylus-tip variation while cleanly rejecting phantom reads.
+ */
+namespace touch {
+    bool is_real_touch() {
+        /* Fast path: IRQ pin HIGH means no touch — skip SPI entirely */
+        if (digitalRead(TOUCH_IRQ_PIN) == HIGH) return false;
+        /* Confirm with Z channel (requires SPI) */
+        TFT_eSPI* tft = display::get_tft();
+        uint16_t z = tft->getTouchRawZ();
+        return z > 0 && z < 600;
+    }
+}
+
 /* ── LVGL indev read callback ────────────────────────────────────── */
 static void touch_read_cb(lv_indev_t* indev, lv_indev_data_t* data) {
-    TFT_eSPI* tft = display::get_tft();
-    uint16_t raw_x = 0, raw_y = 0;
-    bool touched = tft->getTouch(&raw_x, &raw_y);
-
     /* Statics for debug throttle / edge detection */
     static uint32_t s_last_dbg_ms = 0;
     static bool     s_dbg_pressed  = false;
+
+    /* Pressure + IRQ gate — reject phantom reads before any SPI-heavy getTouch */
+    if (!touch::is_real_touch()) {
+        data->state = LV_INDEV_STATE_RELEASED;
+        if (s_debug_touch && s_dbg_pressed) {
+            uint16_t z = display::get_tft()->getTouchRawZ();
+            int irq = digitalRead(TOUCH_IRQ_PIN);
+            Serial.printf("[touch D] raw=(--,--) z=%u irq=%s real_touch=N pressed=N\n",
+                          z, irq == LOW ? "L" : "H");
+            s_dbg_pressed = false;
+        }
+        return;
+    }
+
+    TFT_eSPI* tft = display::get_tft();
+    uint16_t raw_x = 0, raw_y = 0;
+    bool touched = tft->getTouchRaw(&raw_x, &raw_y);
 
     if (touched) {
         /* Apply axis swap: when panel is mounted 90°, raw_y feeds screen-X. */
@@ -104,8 +141,11 @@ static void touch_read_cb(lv_indev_t* indev, lv_indev_data_t* data) {
             uint32_t now = millis();
             if (now - s_last_dbg_ms >= 100) {
                 s_last_dbg_ms = now;
-                Serial.printf("[touch D] raw=(%u,%u) swap=%s val=(%ld,%ld) mapped=(%ld,%ld) pressed=Y\n",
-                              raw_x, raw_y, s_axis_swap ? "Y" : "N",
+                uint16_t z = tft->getTouchRawZ();
+                int irq = digitalRead(TOUCH_IRQ_PIN);
+                Serial.printf("[touch D] raw=(%u,%u) z=%u irq=%s swap=%s val=(%ld,%ld) mapped=(%ld,%ld) real_touch=Y\n",
+                              raw_x, raw_y, z, irq == LOW ? "L" : "H",
+                              s_axis_swap ? "Y" : "N",
                               (long)val_x, (long)val_y, (long)mx, (long)my);
             }
             s_dbg_pressed = true;
@@ -115,7 +155,7 @@ static void touch_read_cb(lv_indev_t* indev, lv_indev_data_t* data) {
 
         /* Log one release edge when debug is active */
         if (s_debug_touch && s_dbg_pressed) {
-            Serial.println("[touch D] raw=(--,--) mapped=(--,--) pressed=N");
+            Serial.println("[touch D] raw=(--,--) z=-- irq=-- real_touch=N pressed=N");
             s_dbg_pressed = false;
         }
     }
@@ -312,6 +352,13 @@ void init() {
         /* Goal 4: prompt user to calibrate without blocking boot */
         Serial.println("[touch] No cal in NVS. Type 'cal' to calibrate, or any tap will use Phase 0 defaults.");
     }
+
+    /* GPIO36 is input-only on ESP32 — no internal pull-up available.
+     * The XPT2046 board has an external pull-up on PENIRQ.  Just configure
+     * as plain INPUT; setting INPUT_PULLUP would be silently ignored anyway. */
+    pinMode(TOUCH_IRQ_PIN, INPUT);
+    Serial.printf("[touch] IRQ pin GPIO%d configured as INPUT (active LOW when touched)\n",
+                  TOUCH_IRQ_PIN);
 
     /* Startup diagnostic — visible in serial monitor at every boot */
     Serial.printf("[touch] init complete: cal x_at_left=%ld x_at_right=%ld y_at_top=%ld y_at_bottom=%ld axis_swap=%d validated=%s\n",
