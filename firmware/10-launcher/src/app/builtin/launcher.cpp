@@ -37,7 +37,9 @@ lv_obj_t* create_screen() {
 
     for (int i = 0; i < app_registry::kBuiltinAppCount; i++) {
         const AppEntry* entry = &app_registry::kBuiltinApps[i];
-        lv_obj_t* tile = widgets::make_tile(grid, entry->label, tile_click_cb);
+        // Pass NULL for the cb arg — make_tile doesn't attach it (caller's responsibility).
+        // We attach tile_click_cb once here with the correct user_data (entry pointer).
+        lv_obj_t* tile = widgets::make_tile(grid, entry->label, NULL);
         lv_obj_add_event_cb(tile, tile_click_cb, LV_EVENT_CLICKED, (void*)entry);
     }
 

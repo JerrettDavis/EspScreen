@@ -25,7 +25,14 @@ static const int32_t kDefaultYMax = 3532;
 /* ── Calibration state ───────────────────────────────────────────── */
 static int32_t s_x_min, s_x_max, s_y_min, s_y_max;
 
-/* Shared TFT instance for getTouch() — same SPI bus as display */
+/* Shared TFT instance for getTouch() — same SPI bus as display.
+ * NOTE: lv_tft_espi_create() (called in display::init) already called
+ * tft.begin() on its internal TFT_eSPI instance.  We must NOT call
+ * s_tft.begin() a second time because that re-initialises the ST7796
+ * controller over SPI and leaves the bus in an inconsistent state.
+ * Instead we skip begin() and use s_tft solely for getTouch() / SPI
+ * touch reads, which share the same hardware SPI peripheral.
+ */
 static TFT_eSPI s_tft;
 
 /* ── LVGL indev read callback ────────────────────────────────────── */
@@ -95,8 +102,9 @@ static void collect_corner(const char* prompt_text, int n, int32_t* out_x, int32
         lv_timer_handler();
     }
 
-    /* Wait for release */
-    while (s_tft.getTouch(nullptr, nullptr)) {
+    /* Wait for release — must pass valid pointers; getTouch writes to *x/*y */
+    uint16_t rx_tmp, ry_tmp;
+    while (s_tft.getTouch(&rx_tmp, &ry_tmp)) {
         delay(20);
     }
     delay(200);
@@ -178,7 +186,13 @@ void touch::run_calibration() {
 namespace touch {
 
 void init() {
-    s_tft.begin();  // TFT_eSPI instance for getTouch()
+    // DO NOT call s_tft.begin() here.
+    // display::init() → lv_tft_espi_create() already called begin() on the
+    // shared SPI bus and initialised the ST7796 controller.  A second begin()
+    // re-asserts RST and re-sends init commands, corrupting the display and
+    // leaving SPI transactions in an inconsistent state that causes crashes
+    // when touch_read_cb fires during an LVGL flush.  The s_tft instance is
+    // used only for getTouch() (SPI touch reads) which work without begin().
 
     /* Load calibration from NVS */
     uint8_t cal = nvs_store::get_u8("touch", "calibrated", 0);
