@@ -36,4 +36,12 @@ namespace touch {
     void apply_cal(int32_t x_at_left, int32_t x_at_right,
                    int32_t y_at_top,  int32_t y_at_bottom,
                    bool axis_swap);
+
+    /**
+     * Returns true only when the XPT2046 is confirming a real physical touch.
+     * Checks GPIO36 PENIRQ (active LOW) first, then the Z-pressure channel.
+     * Z must be < 600 ADC counts (untouched reads ~3000+; real touch is 100–500).
+     * Use this before calling getTouchRaw() to avoid acting on phantom reads.
+     */
+    bool is_real_touch();
 }
