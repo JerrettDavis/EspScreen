@@ -1,5 +1,6 @@
 // DISABLED — see touch.cpp for active touch path.
-// Touch now uses Phase 0 TFT_eSPI built-in mapping with factory cal {275, 3620, 264, 3532, 1}.
+// Touch now uses Phase 0 TFT_eSPI built-in mapping with factory cal {275, 3620, 264, 3532, 3}.
+// calData[4]=3: bit0 swap X/Y + bit1 invert X — corrects observed 90° axis swap.
 // This file is retained for reference only; it is not compiled into the build.
 // To re-enable: add calibrate.h back to app_registry.cpp and main.cpp.
 
