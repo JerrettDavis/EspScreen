@@ -25,20 +25,29 @@ static void back_cb(lv_event_t* /*e*/) {
     screen_router::pop();
 }
 
+/* ── Shared sub-screen cleanup ──────────────────────────────────────── */
+/* Fires on the outgoing screen AFTER the fade-out animation completes.
+ * Deleting here (deferred) avoids the use-after-free that occurs when
+ * lv_obj_delete() is called before screen_router::pop() starts the fade. */
+static void subscreen_unloaded_cb(lv_event_t* e) {
+    lv_obj_t* scr = (lv_obj_t*)lv_event_get_target(e);
+    lv_obj_delete_async(scr);   // safe: animation is already finished
+}
+
 /* ── Claude Profiles sub-screen ─────────────────────────────────────── */
 
 static lv_obj_t* s_claude_screen = nullptr;
 
 static void claude_profiles_back_cb(lv_event_t* /*e*/) {
-    /* Delete the sub-screen before popping so it doesn't leak on the 48 KB heap.
-     * screen_router::pop() restores the previous screen but does NOT auto-delete
-     * the outgoing one. */
-    if (s_claude_screen) { lv_obj_delete(s_claude_screen); s_claude_screen = nullptr; }
+    /* Null the pointer now; actual deletion happens in subscreen_unloaded_cb
+     * after the fade-out animation finishes — avoids use-after-free hang. */
+    s_claude_screen = nullptr;
     screen_router::pop();
 }
 
 static lv_obj_t* create_claude_profiles_screen() {
     lv_obj_t* scr = lv_obj_create(NULL);
+    lv_obj_add_event_cb(scr, subscreen_unloaded_cb, LV_EVENT_SCREEN_UNLOADED, NULL);
     lv_obj_set_size(scr, LV_HOR_RES, LV_VER_RES);
     lv_obj_set_style_bg_color(scr, lv_color_hex(0x0d0d1a), 0);
     lv_obj_set_style_border_width(scr, 0, 0);
@@ -120,13 +129,15 @@ static lv_obj_t* create_claude_profiles_screen() {
 static lv_obj_t* s_wifi_screen = nullptr;
 
 static void wifi_networks_back_cb(lv_event_t* /*e*/) {
-    /* Delete the sub-screen before popping to avoid leaking it on the 48 KB heap. */
-    if (s_wifi_screen) { lv_obj_delete(s_wifi_screen); s_wifi_screen = nullptr; }
+    /* Null the pointer now; actual deletion happens in subscreen_unloaded_cb
+     * after the fade-out animation finishes — avoids use-after-free hang. */
+    s_wifi_screen = nullptr;
     screen_router::pop();
 }
 
 static lv_obj_t* create_wifi_networks_screen() {
     lv_obj_t* scr = lv_obj_create(NULL);
+    lv_obj_add_event_cb(scr, subscreen_unloaded_cb, LV_EVENT_SCREEN_UNLOADED, NULL);
     lv_obj_set_size(scr, LV_HOR_RES, LV_VER_RES);
     lv_obj_set_style_bg_color(scr, lv_color_hex(0x0d0d1a), 0);
     lv_obj_set_style_border_width(scr, 0, 0);
