@@ -123,6 +123,7 @@ void setup() {
     Serial.println("[main]   claude: profile add/remove/list/use | token set | refresh | poll | get");
     Serial.println("[main]   api: set-secret <secret> | status");
     Serial.println("[main]   mirror: on | off | status");
+    Serial.println("[main]   touch <x> <y>  — inject synthetic tap (LVGL coords 0..319, 0..479)");
 }
 
 /* ── Quote-aware argument splitter ──────────────────────────────────
@@ -482,6 +483,19 @@ static void dispatch_serial_cmd(const String& cmd) {
             Serial.println("[net] Subcommands: status | portal");
         }
 
+    /* ── Touch inject command ────────────────────────────────────────── */
+    } else if (verb == "touch") {
+        if (argc < 3) {
+            Serial.println("[touch] Usage: touch <x> <y>  (LVGL coords: x=0..319, y=0..479)");
+            return;
+        }
+        int tx = argv[1].toInt();
+        int ty = argv[2].toInt();
+        if (tx < 0) tx = 0; else if (tx > 319) tx = 319;
+        if (ty < 0) ty = 0; else if (ty > 479) ty = 479;
+        touch::inject((int16_t)tx, (int16_t)ty);
+        Serial.printf("[touch] inject (%d,%d)\n", tx, ty);
+
     /* ── Mirror commands ────────────────────────────────────────────── */
     } else if (verb == "mirror") {
         String sub = (argc >= 2) ? argv[1] : String("status");
@@ -514,7 +528,7 @@ static void dispatch_serial_cmd(const String& cmd) {
 
     } else {
         Serial.printf("[main] Unknown command: '%s'\n", cmd.c_str());
-        Serial.println("[main] Commands: cal | tdbg | info | reset | wifi | claude | api | net | mirror");
+        Serial.println("[main] Commands: cal | tdbg | info | reset | wifi | claude | api | net | mirror | touch");
     }
 }
 

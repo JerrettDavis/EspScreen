@@ -29,22 +29,25 @@ static const uint16_t kCalData[5] = { 275, 3620, 264, 3532, 4 };
 static bool    s_debug_touch  = false;
 static uint32_t s_last_dbg_ms = 0;
 
-/* ── Inject state (one-shot synthetic tap) ───────────────────────── */
-static bool    s_inject_pending = false;
-static int16_t s_inject_x       = 0;
-static int16_t s_inject_y       = 0;
+/* ── Inject state (two-phase synthetic tap: 1=PRESSED, 2=RELEASED) ─ */
+static int8_t  s_inject_phase = 0;   // 0=idle, 1=emit PRESSED, 2=emit RELEASED
+static int16_t s_inject_x     = 0;
+static int16_t s_inject_y     = 0;
 
 /* ── LVGL indev read callback ────────────────────────────────────── */
 static void touch_read_cb(lv_indev_t* indev, lv_indev_data_t* data) {
-    /* ── Injected tap takes priority ──────────────────────────────── */
-    if (s_inject_pending) {
-        s_inject_pending  = false;
-        data->state       = LV_INDEV_STATE_PRESSED;
-        data->point.x     = s_inject_x;
-        data->point.y     = s_inject_y;
+    /* ── Two-phase injected tap takes priority ───────────────────── */
+    if (s_inject_phase > 0) {
+        data->point.x = s_inject_x;
+        data->point.y = s_inject_y;
+        if (s_inject_phase == 1) {
+            data->state    = LV_INDEV_STATE_PRESSED;
+            s_inject_phase = 2;
+        } else {
+            data->state    = LV_INDEV_STATE_RELEASED;
+            s_inject_phase = 0;
+        }
         return;
-        /* Next cycle falls through to the hardware path → RELEASED,
-         * giving LVGL a clean tap event. */
     }
 
     TFT_eSPI* tft = display::get_tft();
@@ -74,13 +77,13 @@ bool get_debug() {
 }
 
 void inject(int16_t x, int16_t y) {
-    if (s_inject_pending) {
-        LOG_W("touch", "inject(%d,%d) dropped — previous inject still pending", x, y);
+    if (s_inject_phase != 0) {
+        LOG_W("touch", "inject(%d,%d) dropped — previous inject still in progress (phase=%d)", x, y, s_inject_phase);
         return;
     }
-    s_inject_x       = x;
-    s_inject_y       = y;
-    s_inject_pending = true;
+    s_inject_x     = x;
+    s_inject_y     = y;
+    s_inject_phase = 1;
 }
 
 void init() {
