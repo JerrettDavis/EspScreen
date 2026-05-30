@@ -1,6 +1,8 @@
 #include "touch_test.h"
 #include "../../os/screen_router.h"
 #include "../../ui/widgets.h"
+#include "../../ui/theme.h"
+#include "../../ui/tokens.h"
 #include <cstdio>
 #include <lvgl.h>
 
@@ -30,21 +32,20 @@ static void back_cb(lv_event_t* e) {
 }
 
 lv_obj_t* create_screen() {
-    lv_obj_t* scr = lv_obj_create(NULL);
-    lv_obj_set_size(scr, LV_HOR_RES, LV_VER_RES);
-    lv_obj_set_style_bg_color(scr, lv_color_hex(0x000000), 0);
+    lv_obj_t* scr = widgets::make_screen();
+    widgets::make_topbar(scr, "Touch Test", back_cb);
 
     /* Coord label */
     s_coord = lv_label_create(scr);
     lv_label_set_text(s_coord, "Touch the screen");
-    lv_obj_set_style_text_color(s_coord, lv_color_hex(0xffffff), 0);
-    lv_obj_align(s_coord, LV_ALIGN_TOP_MID, 0, 12);
+    lv_obj_add_style(s_coord, ui_theme::style_text_value(), 0);
+    lv_obj_align(s_coord, LV_ALIGN_TOP_MID, 0, tok::TOPBAR_H + tok::SP_L);
 
     /* Moving dot */
     s_dot = lv_obj_create(scr);
     lv_obj_set_size(s_dot, 16, 16);
     lv_obj_set_style_radius(s_dot, LV_RADIUS_CIRCLE, 0);
-    lv_obj_set_style_bg_color(s_dot, lv_color_hex(0xff4444), 0);
+    lv_obj_set_style_bg_color(s_dot, lv_color_hex(tok::ACCENT), 0);
     lv_obj_set_pos(s_dot, 0, 0);
     lv_obj_add_flag(s_dot, LV_OBJ_FLAG_HIDDEN);
 
@@ -60,7 +61,6 @@ lv_obj_t* create_screen() {
 
     lv_obj_add_flag(scr, LV_OBJ_FLAG_CLICKABLE);
 
-    widgets::make_back_btn(scr, back_cb);
     return scr;
 }
 

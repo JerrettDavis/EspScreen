@@ -2,7 +2,7 @@
  * wifi_setup.cpp — On-screen WiFi scan + credential entry + connect flow.
  *
  * Three logical steps share ONE pushed screen; content is swapped:
- *   Step 1  Scan list    — scrollable flex-column of lv_button rows
+ *   Step 1  Scan list    — scrollable flex-column of widgets::make_list_row rows
  *   Step 2  Password     — lv_textarea (password mode) + lv_keyboard
  *   Step 3  Connecting   — status label; pops on success after 1.5 s
  *
@@ -20,6 +20,9 @@
 #include "../../os/wifi_profiles.h"
 #include "../../os/screen_router.h"
 #include "../../os/logger.h"
+#include "../../ui/widgets.h"
+#include "../../ui/theme.h"
+#include "../../ui/tokens.h"
 #include <lvgl.h>
 #include <Arduino.h>   // esp_get_free_heap_size, millis
 
@@ -58,34 +61,6 @@ static char s_sel_ssid[33]      = {0};
 static void show_step1_scan(lv_obj_t* scr);
 static void show_step2_password(lv_obj_t* scr);
 static void show_step3_connect(lv_obj_t* scr, const char* pw);
-
-/* ── Topbar helper (replicates the exact settings.cpp topbar pattern) ── */
-
-static void build_topbar(lv_obj_t* scr, const char* title_text,
-                         lv_event_cb_t back_cb) {
-    lv_obj_t* topbar = lv_obj_create(scr);
-    lv_obj_set_size(topbar, LV_HOR_RES, 36);
-    lv_obj_align(topbar, LV_ALIGN_TOP_MID, 0, 0);
-    lv_obj_set_style_bg_color(topbar, lv_color_hex(0x1a1a2e), 0);
-    lv_obj_set_style_border_width(topbar, 0, 0);
-    lv_obj_set_style_pad_all(topbar, 0, 0);
-    lv_obj_set_style_radius(topbar, 0, 0);
-
-    lv_obj_t* back_btn = lv_button_create(topbar);
-    lv_obj_set_size(back_btn, 48, 28);
-    lv_obj_align(back_btn, LV_ALIGN_LEFT_MID, 4, 0);
-    lv_obj_set_style_radius(back_btn, 6, 0);
-    lv_obj_add_event_cb(back_btn, back_cb, LV_EVENT_CLICKED, NULL);
-    lv_obj_t* back_lbl = lv_label_create(back_btn);
-    lv_label_set_text(back_lbl, LV_SYMBOL_LEFT);
-    lv_obj_center(back_lbl);
-
-    lv_obj_t* title = lv_label_create(topbar);
-    lv_label_set_text(title, title_text);
-    lv_obj_set_style_text_font(title, &lv_font_montserrat_14, 0);
-    lv_obj_set_style_text_color(title, lv_color_hex(0xffffff), 0);
-    lv_obj_align(title, LV_ALIGN_CENTER, 0, 0);
-}
 
 /* ── Screen lifecycle ────────────────────────────────────────────────── */
 
@@ -154,22 +129,22 @@ static void show_step1_scan(lv_obj_t* scr) {
 
     /* Scrollable flex-column container below the topbar */
     lv_obj_t* cont = lv_obj_create(scr);
-    lv_obj_set_size(cont, LV_HOR_RES, LV_VER_RES - 36);
-    lv_obj_align(cont, LV_ALIGN_TOP_MID, 0, 36);
-    lv_obj_set_style_bg_color(cont, lv_color_hex(0x0d0d1a), 0);
+    lv_obj_set_size(cont, LV_HOR_RES, LV_VER_RES - tok::TOPBAR_H);
+    lv_obj_align(cont, LV_ALIGN_TOP_MID, 0, tok::TOPBAR_H);
+    lv_obj_set_style_bg_color(cont, lv_color_hex(tok::BG_BASE), 0);
     lv_obj_set_style_border_width(cont, 0, 0);
-    lv_obj_set_style_pad_all(cont, 6, 0);
+    lv_obj_set_style_pad_all(cont, tok::SP_S, 0);
     lv_obj_set_scrollbar_mode(cont, LV_SCROLLBAR_MODE_AUTO);
     lv_obj_set_flex_flow(cont, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(cont, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_START);
     s_scan_cont = cont;
 
-    /* "Scanning…" placeholder */
+    /* "Scanning…" placeholder — styled as muted text, centered in the container */
     lv_obj_t* scanning_lbl = lv_label_create(cont);
     lv_label_set_text(scanning_lbl, "Scanning...");
-    lv_obj_set_style_text_font(scanning_lbl, &lv_font_montserrat_14, 0);
-    lv_obj_set_style_text_color(scanning_lbl, lv_color_hex(0x888899), 0);
-    lv_obj_set_style_pad_top(scanning_lbl, 12, 0);
+    lv_obj_add_style(scanning_lbl, ui_theme::style_text_muted(), LV_PART_MAIN);
+    lv_obj_set_style_pad_top(scanning_lbl, tok::SP_M, 0);
+    lv_obj_set_align(scanning_lbl, LV_ALIGN_CENTER);
 
     /* Force LVGL to render the "Scanning…" label before we block on scan */
     lv_refr_now(NULL);
@@ -184,40 +159,32 @@ static void show_step1_scan(lv_obj_t* scr) {
     if (s_scan_count == 0) {
         lv_obj_t* none_lbl = lv_label_create(cont);
         lv_label_set_text(none_lbl, "No networks found.\nCheck WiFi antenna.");
-        lv_obj_set_style_text_font(none_lbl, &lv_font_montserrat_14, 0);
-        lv_obj_set_style_text_color(none_lbl, lv_color_hex(0x888899), 0);
-        lv_obj_set_style_pad_top(none_lbl, 12, 0);
+        lv_obj_add_style(none_lbl, ui_theme::style_text_muted(), LV_PART_MAIN);
+        lv_obj_set_style_pad_top(none_lbl, tok::SP_M, 0);
         return;
     }
 
-    /* Build one lv_button row per scan result */
+    /* Build one make_list_row per scan result */
     for (uint8_t i = 0; i < s_scan_count; i++) {
         /* Populate per-row data pool */
         strlcpy(s_row_data[i].ssid, s_scan_buf[i].ssid, sizeof(s_row_data[i].ssid));
         s_row_data[i].enc = s_scan_buf[i].enc;
 
-        lv_obj_t* btn = lv_button_create(cont);
-        lv_obj_set_size(btn, LV_PCT(100), 40);
-        lv_obj_set_style_bg_color(btn, lv_color_hex(0x1a1a2e), 0);
-        lv_obj_set_style_bg_color(btn, lv_color_hex(0x2a2a4e), LV_STATE_PRESSED);
-        lv_obj_set_style_radius(btn, 6, 0);
-        lv_obj_set_style_border_width(btn, 0, 0);
-        lv_obj_set_style_margin_ver(btn, 2, 0);
-        lv_obj_add_event_cb(btn, ssid_btn_cb, LV_EVENT_CLICKED,
-                            static_cast<void*>(&s_row_data[i]));
+        /* RSSI value string, e.g. "-67 dBm" */
+        char rssi_str[16];
+        snprintf(rssi_str, sizeof(rssi_str), "%d dBm", (int)s_scan_buf[i].rssi);
 
-        /* Row label: lock-or-wifi glyph + SSID + RSSI */
-        char row_text[64];
-        const char* lock_glyph = (s_scan_buf[i].enc != 0) ? LV_SYMBOL_CLOSE " " : LV_SYMBOL_WIFI " ";
-        snprintf(row_text, sizeof(row_text), "%s%s  %d dBm",
-                 lock_glyph, s_scan_buf[i].ssid, (int)s_scan_buf[i].rssi);
+        /* Trailing indicator: "secured" for encrypted, "open" for open networks.
+         * LV_SYMBOL_CLOSE is intentionally NOT used — in the LVGL built-in symbol
+         * font it renders as an error/close glyph, not a padlock. */
+        const char* trailing = (s_scan_buf[i].enc != 0) ? "secured" : "open";
 
-        lv_obj_t* lbl = lv_label_create(btn);
-        lv_label_set_text(lbl, row_text);
-        lv_label_set_long_mode(lbl, LV_LABEL_LONG_CLIP);
-        lv_obj_set_style_text_font(lbl, &lv_font_montserrat_14, 0);
-        lv_obj_set_style_text_color(lbl, lv_color_hex(0xddddff), 0);
-        lv_obj_align(lbl, LV_ALIGN_LEFT_MID, 6, 0);
+        widgets::make_list_row(cont,
+                               s_scan_buf[i].ssid,
+                               rssi_str,
+                               trailing,
+                               ssid_btn_cb,
+                               static_cast<void*>(&s_row_data[i]));
     }
 }
 
@@ -258,10 +225,12 @@ static void show_step2_password(lv_obj_t* scr) {
         LOG_I("wifi_setup", "step2: scan container freed before keyboard alloc");
     }
 
-    /* Password textarea */
+    /* Password textarea — full width, SURFACE bg, R_M radius, password mode */
     lv_obj_t* ta = lv_textarea_create(scr);
-    lv_obj_set_size(ta, LV_HOR_RES - 20, 40);
-    lv_obj_align(ta, LV_ALIGN_TOP_MID, 0, 44);
+    lv_obj_set_size(ta, LV_HOR_RES - tok::SP_L * 2, tok::TAP_MIN);
+    lv_obj_align(ta, LV_ALIGN_TOP_MID, 0, tok::TOPBAR_H + tok::SP_M);
+    lv_obj_set_style_bg_color(ta, lv_color_hex(tok::SURFACE), 0);
+    lv_obj_set_style_radius(ta, tok::R_M, 0);
     lv_textarea_set_one_line(ta, true);
     lv_textarea_set_password_mode(ta, true);
     lv_textarea_set_placeholder_text(ta, "Enter password...");
@@ -311,11 +280,10 @@ static void show_step3_connect(lv_obj_t* scr, const char* pw) {
     if (s_status_lbl) { lv_obj_delete(s_status_lbl); s_status_lbl = nullptr; }
     if (s_hint_lbl)   { lv_obj_delete(s_hint_lbl);   s_hint_lbl   = nullptr; }
 
-    /* Status label */
+    /* Status label — style_title (montserrat_20, TEXT_PRIMARY) */
     lv_obj_t* lbl = lv_label_create(scr);
     lv_label_set_text(lbl, "Connecting...");
-    lv_obj_set_style_text_font(lbl, &lv_font_montserrat_20, 0);
-    lv_obj_set_style_text_color(lbl, lv_color_hex(0xddddff), 0);
+    lv_obj_add_style(lbl, ui_theme::style_title(), LV_PART_MAIN);
     lv_obj_align(lbl, LV_ALIGN_CENTER, 0, 0);
     s_status_lbl = lbl;
 
@@ -328,7 +296,7 @@ static void show_step3_connect(lv_obj_t* scr, const char* pw) {
 
     if (ok) {
         lv_label_set_text(s_status_lbl, "Connected " LV_SYMBOL_OK);
-        lv_obj_set_style_text_color(s_status_lbl, lv_color_hex(0x4ADE80), 0);
+        lv_obj_set_style_text_color(s_status_lbl, lv_color_hex(tok::SUCCESS), 0);
         LOG_I("wifi_setup", "step3: connected — scheduling pop in %u ms",
               (unsigned)SUCCESS_POP_DELAY_MS);
 
@@ -337,13 +305,12 @@ static void show_step3_connect(lv_obj_t* scr, const char* pw) {
         lv_timer_set_repeat_count(s_pop_timer, 1);
     } else {
         lv_label_set_text(s_status_lbl, "Failed " LV_SYMBOL_CLOSE);
-        lv_obj_set_style_text_color(s_status_lbl, lv_color_hex(0xFF6B6B), 0);
+        lv_obj_set_style_text_color(s_status_lbl, lv_color_hex(tok::ERROR_), 0);
 
         /* Sub-label: suggest trying again */
         lv_obj_t* hint = lv_label_create(scr);
         lv_label_set_text(hint, "Tap " LV_SYMBOL_LEFT " to retry");
-        lv_obj_set_style_text_font(hint, &lv_font_montserrat_14, 0);
-        lv_obj_set_style_text_color(hint, lv_color_hex(0x888899), 0);
+        lv_obj_add_style(hint, ui_theme::style_text_muted(), LV_PART_MAIN);
         lv_obj_align(hint, LV_ALIGN_CENTER, 0, 30);
         s_hint_lbl = hint;  // track for cleanup on re-entry
         LOG_W("wifi_setup", "step3: connection failed for selected SSID");
@@ -370,19 +337,17 @@ lv_obj_t* create_screen() {
     /* Reset SSID selection */
     s_sel_ssid[0] = '\0';
 
-    lv_obj_t* scr = lv_obj_create(NULL);
-    lv_obj_set_size(scr, LV_HOR_RES, LV_VER_RES);
-    lv_obj_set_style_bg_color(scr, lv_color_hex(0x0d0d1a), 0);
-    lv_obj_set_style_border_width(scr, 0, 0);
-    lv_obj_set_style_pad_all(scr, 0, 0);
+    /* Dark 320x480 screen via design-system factory */
+    lv_obj_t* scr = widgets::make_screen();
 
     /* Register delete handler — mirrors claude_widget.cpp lifecycle */
     lv_obj_add_event_cb(scr, screen_delete_cb, LV_EVENT_DELETE, NULL);
 
     s_screen = scr;
 
-    /* Build the persistent topbar (Step 1 title; back navigates to caller) */
-    build_topbar(scr, "Scan & Add Network", setup_back_cb);
+    /* Persistent topbar for Step 1: "Add Network", back navigates to caller.
+     * build_topbar() is fully replaced by widgets::make_topbar(). */
+    widgets::make_topbar(scr, "Add Network", setup_back_cb);
 
     /* Kick off Step 1 */
     show_step1_scan(scr);
