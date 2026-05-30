@@ -18,6 +18,7 @@
 #include "net_manager.h"
 #include "wifi_profiles.h"
 #include "claude_auth.h"
+#include "api_server.h"
 #include "nvs_store.h"
 #include "logger.h"
 #include "config.h"
@@ -459,6 +460,38 @@ static void handle_mirror_config_post() {
     LOG_I("portal", "POST /api/mirror/config enabled=%d interval=%d", (int)mc.enabled, mc.interval_ms);
 }
 
+/* ── POST /api/security/secret ───────────────────────────────────────────── */
+
+static void handle_security_secret_post() {
+    if (!portal_authorized()) {
+        send_json(401, "{\"error\":\"unauthorized\"}");
+        return;
+    }
+    String body = s_server->arg("plain");
+    if (body.length() > 256) { send_json(413, "{\"error\":\"body too large\"}"); return; }
+    if (body.isEmpty()) {
+        send_json(400, "{\"error\":\"empty body\"}");
+        return;
+    }
+
+    JsonDocument doc;
+    if (deserializeJson(doc, body)) {
+        send_json(400, "{\"error\":\"json parse\"}");
+        return;
+    }
+
+    /* "secret" key must be present; allow empty string to CLEAR the secret */
+    if (!doc.containsKey("secret")) {
+        send_json(400, "{\"error\":\"missing secret field\"}");
+        return;
+    }
+    const char* newsecret = doc["secret"] | "";
+
+    api_server::set_secret(newsecret);
+    send_json(200, "{\"ok\":true}");
+    LOG_I("portal", "POST /api/security/secret → ok (len=%u)", (unsigned)strlen(newsecret));
+}
+
 /* ── OPTIONS preflight (CORS) ────────────────────────────────────────────── */
 
 static void handle_options() {
@@ -513,6 +546,10 @@ void begin(bool ap_mode) {
     s_server->on("/api/claude/profile",    HTTP_OPTIONS, handle_options);
     s_server->on("/api/claude/tokens",     HTTP_POST,    handle_claude_tokens);
     s_server->on("/api/claude/tokens",     HTTP_OPTIONS, handle_options);
+
+    /* Security — set/change the device API passcode */
+    s_server->on("/api/security/secret",   HTTP_POST,    handle_security_secret_post);
+    s_server->on("/api/security/secret",   HTTP_OPTIONS, handle_options);
 
     /* Screen mirror — GET open (read-only), POST auth-guarded */
     s_server->on("/api/screen",            HTTP_GET,     handle_screen_get);

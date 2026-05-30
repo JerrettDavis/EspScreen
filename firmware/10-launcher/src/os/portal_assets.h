@@ -135,6 +135,14 @@ input[type=range]::-moz-range-thumb{width:15px;height:15px;border-radius:50%;bac
 <button class="bs" onclick="saveSec()">Save secret</button>
 <div id="secMsg" class="muted" style="font-size:.76rem;color:#64748b;margin-top:5px;min-height:1em"></div>
 </div>
+<div class="cd">
+<h2>&#x1F512; Set device passcode</h2>
+<p style="font-size:.76rem;color:#94a3b8;margin-bottom:6px">In AP/setup mode you can set the passcode freely. In STA mode you must first enter the <em>current</em> passcode in the &ldquo;Device secret&rdquo; field above so the request is authorised.</p>
+<label>New passcode</label>
+<input id="newsec" type="password" placeholder="new passcode (blank = clear)">
+<button class="bp" onclick="setDeviceSec()">Set on device</button>
+<div id="newsecMsg" class="muted" style="font-size:.76rem;color:#64748b;margin-top:5px;min-height:1em"></div>
+</div>
 </div>
 
 <script>
@@ -144,6 +152,17 @@ function kv(k,v,c){return '<div class="kv"><span class="kk">'+k+'</span><span cl
 function hdr(){var h={'Content-Type':'application/json'};var s=localStorage.getItem('espSec');if(s)h['X-EspScreen-Secret']=s;return h;}
 function loadSec(){var s=localStorage.getItem('espSec');if(s)document.getElementById('sec').value=s;}
 function saveSec(){localStorage.setItem('espSec',document.getElementById('sec').value);document.getElementById('secMsg').textContent='Saved';}
+function setDeviceSec(){
+var v=document.getElementById('newsec').value;
+fetch('/api/security/secret',{method:'POST',headers:hdr(),body:JSON.stringify({secret:v})})
+.then(function(r){
+if(r.status===401){document.getElementById('newsecMsg').textContent='Unauthorized — enter the CURRENT passcode in the "Device secret" field above first.';return;}
+if(!r.ok){document.getElementById('newsecMsg').textContent='Failed ('+r.status+')';return;}
+localStorage.setItem('espSec',v);
+document.getElementById('sec').value=v;
+document.getElementById('newsecMsg').textContent=v?'Passcode set ✓':'Passcode cleared ✓';
+}).catch(function(){document.getElementById('newsecMsg').textContent='Network error';});
+}
 var AT='mirror';
 document.querySelectorAll('.tb').forEach(function(t){
 t.addEventListener('click',function(){
@@ -311,4 +330,4 @@ loadSec();
 </body>
 </html>)HTML";
 
-static_assert(sizeof(PORTAL_HTML) < 22000, "portal HTML too large for no-PSRAM device");
+static_assert(sizeof(PORTAL_HTML) < 24000, "portal HTML too large for no-PSRAM device");
