@@ -11,6 +11,14 @@
  *   0-60%:   green  #4ADE80
  *   60-85%:  amber  #FBBF24
  *   85-100%: red    #EF4444
+ *
+ * Threading model (v2 — non-blocking):
+ *   Network runs in a FreeRTOS task on core 0 (poll_task).
+ *   Results are delivered via a single-slot queue (s_result_q) to the LVGL thread.
+ *   s_result_q is created once (lazy init) and NEVER deleted during the app's
+ *   lifetime — this avoids a use-after-free race between a still-running poll
+ *   task and screen_delete_cb destroying the queue. The queue simply persists
+ *   until the next open, which drains any stale result harmlessly.
  */
 
 #include "claude_widget.h"
@@ -27,6 +35,10 @@
 #include <Arduino.h>
 #include <time.h>
 #include <math.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
+#include <freertos/queue.h>
+#include <esp_heap_caps.h>
 
 namespace claude_widget {
 
@@ -34,9 +46,30 @@ namespace claude_widget {
 static const char* ANTHROPIC_USAGE_URL = "https://api.anthropic.com/api/oauth/usage";
 static const char* ANTHROPIC_BETA_HDR  = "oauth-2025-04-20";
 
+/* ── Poll result struct — filled by poll_task, read by apply_cb ───────── */
+struct PollResult {
+    bool  ok;           // true = HTTP 200 + valid JSON
+    int   http_code;    // raw HTTP status (or -1 for network error)
+    int   pct5h;
+    int   pct7d;
+    char  reset5h[24];  // formatted duration string, e.g. "2h 15m"
+    char  reset7d[24];
+    char  err[64];      // error message when ok==false
+    bool  token_expired;
+};
+
+/* ── Background task / queue state ───────────────────────────────────── */
+/* s_result_q: single-slot queue, persistent across screen open/close.
+ * Created lazily on first trigger_poll() and never deleted.
+ * Avoids use-after-free if poll_task is still writing when screen closes. */
+static QueueHandle_t s_result_q    = nullptr;
+static volatile bool s_poll_inflight = false;  // true while poll_task is running
+static TaskHandle_t  s_poll_task   = nullptr;
+
 /* ── Timer / screen state ─────────────────────────────────────────────── */
 static lv_timer_t* s_poll_timer      = nullptr;
 static lv_timer_t* s_immediate_timer = nullptr;
+static lv_timer_t* s_apply_timer     = nullptr;  // 250ms LVGL-thread drain
 static lv_obj_t*   s_screen          = nullptr;
 
 /* ── UI element handles ───────────────────────────────────────────────── */
@@ -132,124 +165,61 @@ static void stamp_update_time() {
     lv_label_set_text(s_lbl_updated, buf);
 }
 
-/* ── JSON parsing — maps Anthropic API shape directly ────────────────── */
-/*
- * Anthropic GET /api/oauth/usage response shape (confirmed via server.js):
- * {
- *   "five_hour":  { "utilization": 12, "resets_at": "2026-05-28T12:30:00Z" },
- *   "seven_day":  { "utilization": 45, "resets_at": "2026-06-04T00:00:00Z" },
- *   ...
- * }
- * The utilization field is already an integer on a 0–100 percent scale (e.g. 12 means 12%).
- * Use it directly for the bars without further multiplication.
- */
-static void apply_json(const char* json_str) {
-    JsonDocument doc;
-    DeserializationError err = deserializeJson(doc, json_str);
-    if (err) {
-        LOG_W("claude_w", "JSON parse error: %s", err.c_str());
-        set_status(("JSON error: " + String(err.c_str())).c_str());
+/* ── ISO-8601 timestamp → seconds-until helper (no LVGL, safe for task) ─ */
+static int32_t parse_reset_secs(const char* ts) {
+    if (!ts) return 0;
+    struct tm t = {};
+    char* p = strptime(ts, "%Y-%m-%dT%H:%M:%S", &t);
+    if (!p) return 0;
+    /* Skip optional fractional seconds */
+    if (*p == '.') { ++p; while (*p >= '0' && *p <= '9') ++p; }
+    int tz_offset_secs = 0;
+    if (*p == 'Z' || *p == 'z') {
+        tz_offset_secs = 0;
+    } else if (*p == '+' || *p == '-') {
+        int sign = (*p == '+') ? 1 : -1;
+        ++p;
+        int hh = 0, mm = 0;
+        sscanf(p, "%2d:%2d", &hh, &mm);
+        tz_offset_secs = sign * (hh * 3600 + mm * 60);
+    }
+    t.tm_isdst = 0;
+    time_t local_epoch = mktime(&t);
+    time_t target = local_epoch - tz_offset_secs;
+    int32_t secs = (int32_t)(target - time(nullptr));
+    return secs < 0 ? 0 : secs;
+}
+
+/* ── Apply PollResult to LVGL widgets — LVGL thread only ─────────────── */
+static void apply_result(const PollResult& res) {
+    /* Guard: screen may have been destroyed while task was running */
+    if (!s_screen) return;
+
+    if (!res.ok) {
         set_connected(false);
+        set_status(res.err);
+        show_expired(res.token_expired);
         return;
     }
 
     set_connected(true);
     set_status("");
     show_stale(false);
+    show_expired(false);
 
-    /* five_hour */
-    JsonObject fh = doc["five_hour"];
-    if (!fh.isNull()) {
-        /* Bug 1 fix: utilization is a JSON float (e.g. 6.0); use float default
-         * so ArduinoJson 7 doesn't silently zero it with an int | 0 fallback. */
-        float util5h = fh["utilization"] | 0.0f;
-        int pct5h = (int)roundf(util5h);
-        const char* resets_at_5h = fh["resets_at"] | nullptr;
-        int32_t reset5h = 0;
-        if (resets_at_5h) {
-            struct tm t = {};
-            /* Bug 2 fix: parse only the fixed 19-char prefix (YYYY-MM-DDTHH:MM:SS),
-             * then extract the numeric UTC offset (+HH:MM / -HH:MM) or Z.
-             * The live API returns fractional seconds + offset, e.g.
-             * "2026-05-29T17:50:00.053337-05:00" — strptime("%…Z") fails on these. */
-            char* p = strptime(resets_at_5h, "%Y-%m-%dT%H:%M:%S", &t);
-            if (p) {
-                /* Skip optional fractional seconds */
-                if (*p == '.') { ++p; while (*p >= '0' && *p <= '9') ++p; }
-                /* Parse timezone offset */
-                int tz_offset_secs = 0;
-                if (*p == 'Z' || *p == 'z') {
-                    tz_offset_secs = 0;
-                } else if (*p == '+' || *p == '-') {
-                    int sign = (*p == '+') ? 1 : -1;
-                    ++p;
-                    int hh = 0, mm = 0;
-                    sscanf(p, "%2d:%2d", &hh, &mm);
-                    tz_offset_secs = sign * (hh * 3600 + mm * 60);
-                }
-                /* Convert local time fields → UTC epoch.
-                 * timegm() treats tm as UTC; not always available on ESP32.
-                 * Portable alternative: mktime() (treats tm as local) then
-                 * subtract timezone. On ESP32 with NTP, TZ is UTC so they agree.
-                 * We subtract tz_offset_secs to convert API-local → UTC:
-                 *   utc_epoch = mktime_as_utc(t) - tz_offset_secs */
-                t.tm_isdst = 0;
-                time_t local_epoch = mktime(&t);          // treated as local (UTC on device)
-                time_t target = local_epoch - tz_offset_secs;
-                reset5h = (int32_t)(target - time(nullptr));
-                if (reset5h < 0) reset5h = 0;
-            }
-        }
-        set_bar_value(s_bar_5h, pct5h);
-        char pct_buf[16];
-        snprintf(pct_buf, sizeof(pct_buf), "%d%%", pct5h);
-        if (s_lbl_5h_pct)   lv_label_set_text(s_lbl_5h_pct, pct_buf);
-        char dur_buf[24], reset_buf[40];
-        fmt_duration(dur_buf, sizeof(dur_buf), reset5h);
-        snprintf(reset_buf, sizeof(reset_buf), "Resets in %s", dur_buf);
-        if (s_lbl_5h_reset) lv_label_set_text(s_lbl_5h_reset, reset_buf);
-    }
+    set_bar_value(s_bar_5h, res.pct5h);
+    char pct_buf[16];
+    snprintf(pct_buf, sizeof(pct_buf), "%d%%", res.pct5h);
+    if (s_lbl_5h_pct)   lv_label_set_text(s_lbl_5h_pct, pct_buf);
+    char reset_buf[40];
+    snprintf(reset_buf, sizeof(reset_buf), "Resets in %s", res.reset5h);
+    if (s_lbl_5h_reset) lv_label_set_text(s_lbl_5h_reset, reset_buf);
 
-    /* seven_day */
-    JsonObject sd = doc["seven_day"];
-    if (!sd.isNull()) {
-        /* Bug 1 fix: same float-read pattern as five_hour above */
-        float util7d = sd["utilization"] | 0.0f;
-        int pct7d = (int)roundf(util7d);
-        const char* resets_at_7d = sd["resets_at"] | nullptr;
-        int32_t reset7d = 0;
-        if (resets_at_7d) {
-            struct tm t = {};
-            /* Bug 2 fix: same robust ISO-8601 parse as five_hour above */
-            char* p = strptime(resets_at_7d, "%Y-%m-%dT%H:%M:%S", &t);
-            if (p) {
-                if (*p == '.') { ++p; while (*p >= '0' && *p <= '9') ++p; }
-                int tz_offset_secs = 0;
-                if (*p == 'Z' || *p == 'z') {
-                    tz_offset_secs = 0;
-                } else if (*p == '+' || *p == '-') {
-                    int sign = (*p == '+') ? 1 : -1;
-                    ++p;
-                    int hh = 0, mm = 0;
-                    sscanf(p, "%2d:%2d", &hh, &mm);
-                    tz_offset_secs = sign * (hh * 3600 + mm * 60);
-                }
-                t.tm_isdst = 0;
-                time_t local_epoch = mktime(&t);
-                time_t target = local_epoch - tz_offset_secs;
-                reset7d = (int32_t)(target - time(nullptr));
-                if (reset7d < 0) reset7d = 0;
-            }
-        }
-        set_bar_value(s_bar_7d, pct7d);
-        char pct_buf[16];
-        snprintf(pct_buf, sizeof(pct_buf), "%d%%", pct7d);
-        if (s_lbl_7d_pct)   lv_label_set_text(s_lbl_7d_pct, pct_buf);
-        char dur_buf[24], reset_buf[40];
-        fmt_duration(dur_buf, sizeof(dur_buf), reset7d);
-        snprintf(reset_buf, sizeof(reset_buf), "Resets in %s", dur_buf);
-        if (s_lbl_7d_reset) lv_label_set_text(s_lbl_7d_reset, reset_buf);
-    }
+    set_bar_value(s_bar_7d, res.pct7d);
+    snprintf(pct_buf, sizeof(pct_buf), "%d%%", res.pct7d);
+    if (s_lbl_7d_pct)   lv_label_set_text(s_lbl_7d_pct, pct_buf);
+    snprintf(reset_buf, sizeof(reset_buf), "Resets in %s", res.reset7d);
+    if (s_lbl_7d_reset) lv_label_set_text(s_lbl_7d_reset, reset_buf);
 
     /* Session fields — not present in the usage API, show placeholders */
     if (s_lbl_model)     lv_label_set_text(s_lbl_model, "Claude");
@@ -260,30 +230,260 @@ static void apply_json(const char* json_str) {
     /* Headroom — not available in direct-API mode */
     if (s_headroom_cont) lv_obj_add_flag(s_headroom_cont, LV_OBJ_FLAG_HIDDEN);
 
+    update_title();
     stamp_update_time();
+}
+
+/* ── NETWORK PART — runs inside poll_task, NO LVGL calls allowed ──────── */
+/*
+ * Performs the complete HTTP round-trip (including token refresh if needed)
+ * and fills out a PollResult. Does NOT touch s_screen or any lv_* API.
+ * All String temporaries are destroyed before xQueueOverwrite, keeping
+ * peak heap low during the handoff.
+ */
+static void do_network_poll(PollResult& result) {
+    memset(&result, 0, sizeof(result));
+    result.ok = false;
+
+    if (!wifi_profiles::is_connected()) {
+        snprintf(result.err, sizeof(result.err), "WiFi not connected");
+        LOG_W("claude_w", "poll_task: WiFi not connected");
+        return;
+    }
+
+    bool is_expired = false;
+    String token = claude_auth::get_active_access_token(&is_expired);
+
+    if (token.isEmpty()) {
+        if (claude_auth::profile_count() == 0) {
+            snprintf(result.err, sizeof(result.err), "No Claude profile configured");
+        } else {
+            snprintf(result.err, sizeof(result.err), "No access token configured");
+            result.token_expired = true;
+        }
+        LOG_W("claude_w", "poll_task: %s", result.err);
+        return;
+    }
+
+    /* Proactive refresh if token is expired */
+    if (is_expired) {
+        LOG_I("claude_w", "poll_task: token expired — attempting refresh");
+        if (claude_auth::refresh_active()) {
+            LOG_I("claude_w", "poll_task: token refreshed successfully");
+            token = claude_auth::get_active_access_token(&is_expired);
+        } else {
+            LOG_W("claude_w", "poll_task: refresh failed — attempting poll with stale token");
+            result.token_expired = true;
+        }
+    }
+
+    LOG_I("claude_w", "poll_task pre-HTTPS heap: %lu", (unsigned long)esp_get_free_heap_size());
+
+    /* ── First attempt ─────────────────────────────────────────────── */
+    WiFiClientSecure client;
+    client.setInsecure();  // TODO: pin cert for production
+
+    HTTPClient http;
+    http.begin(client, ANTHROPIC_USAGE_URL);
+    http.setTimeout(10000);
+    http.addHeader("Authorization", "Bearer " + token);
+    http.addHeader("anthropic-beta", ANTHROPIC_BETA_HDR);
+    http.addHeader("Content-Type", "application/json");
+
+    int code = http.GET();
+    result.http_code = code;
+
+    LOG_I("claude_w", "poll_task post-HTTPS heap: %lu  HTTP=%d",
+          (unsigned long)esp_get_free_heap_size(), code);
+
+    if (code == 401) {
+        http.end();
+        client.stop();
+        /* 401 — attempt one refresh-and-retry cycle */
+        LOG_W("claude_w", "poll_task: 401 — attempting token refresh");
+        if (claude_auth::refresh_active()) {
+            token = claude_auth::get_active_access_token(nullptr);
+            WiFiClientSecure client2;
+            client2.setInsecure();
+            HTTPClient http2;
+            http2.begin(client2, ANTHROPIC_USAGE_URL);
+            http2.setTimeout(10000);
+            http2.addHeader("Authorization", "Bearer " + token);
+            http2.addHeader("anthropic-beta", ANTHROPIC_BETA_HDR);
+            http2.addHeader("Content-Type", "application/json");
+            code = http2.GET();
+            result.http_code = code;
+            if (code == 200) {
+                String body2 = http2.getString();
+                http2.end();
+                client2.stop();
+                /* Parse JSON */
+                JsonDocument doc;
+                DeserializationError err = deserializeJson(doc, body2);
+                if (err) {
+                    snprintf(result.err, sizeof(result.err), "JSON error: %s", err.c_str());
+                    LOG_W("claude_w", "poll_task: %s", result.err);
+                    return;
+                }
+                JsonObject fh = doc["five_hour"];
+                if (!fh.isNull()) {
+                    result.pct5h = (int)roundf(fh["utilization"] | 0.0f);
+                    int32_t secs5h = parse_reset_secs(fh["resets_at"] | (const char*)nullptr);
+                    fmt_duration(result.reset5h, sizeof(result.reset5h), secs5h);
+                }
+                JsonObject sd = doc["seven_day"];
+                if (!sd.isNull()) {
+                    result.pct7d = (int)roundf(sd["utilization"] | 0.0f);
+                    int32_t secs7d = parse_reset_secs(sd["resets_at"] | (const char*)nullptr);
+                    fmt_duration(result.reset7d, sizeof(result.reset7d), secs7d);
+                }
+                result.ok = true;
+                LOG_I("claude_w", "poll_task: retry after refresh succeeded");
+            } else {
+                http2.end();
+                client2.stop();
+                result.token_expired = true;
+                snprintf(result.err, sizeof(result.err), "Auth failed — reprovision tokens");
+                LOG_W("claude_w", "poll_task: retry after refresh failed: %d", code);
+            }
+        } else {
+            result.token_expired = true;
+            snprintf(result.err, sizeof(result.err), "Token expired — use 'claude token set'");
+            LOG_W("claude_w", "poll_task: refresh failed");
+        }
+        return;
+    }
+
+    if (code == 200) {
+        String body = http.getString();
+        http.end();
+        client.stop();
+        /* Parse JSON */
+        JsonDocument doc;
+        DeserializationError err = deserializeJson(doc, body);
+        if (err) {
+            snprintf(result.err, sizeof(result.err), "JSON error: %s", err.c_str());
+            LOG_W("claude_w", "poll_task: %s", result.err);
+            return;
+        }
+        LOG_I("claude_w", "poll_task: Poll OK (%d bytes)", body.length());
+        JsonObject fh = doc["five_hour"];
+        if (!fh.isNull()) {
+            result.pct5h = (int)roundf(fh["utilization"] | 0.0f);
+            int32_t secs5h = parse_reset_secs(fh["resets_at"] | (const char*)nullptr);
+            fmt_duration(result.reset5h, sizeof(result.reset5h), secs5h);
+        }
+        JsonObject sd = doc["seven_day"];
+        if (!sd.isNull()) {
+            result.pct7d = (int)roundf(sd["utilization"] | 0.0f);
+            int32_t secs7d = parse_reset_secs(sd["resets_at"] | (const char*)nullptr);
+            fmt_duration(result.reset7d, sizeof(result.reset7d), secs7d);
+        }
+        result.ok = true;
+    } else {
+        String body = http.getString();
+        http.end();
+        client.stop();
+        snprintf(result.err, sizeof(result.err), "HTTP error: %d", code);
+        LOG_W("claude_w", "poll_task: %s", result.err);
+    }
+}
+
+/* ── FreeRTOS poll task — core 0, 20KB stack ─────────────────────────── */
+/*
+ * Stack is 20480 bytes (bumped from 16384) to ensure TLS handshake fits
+ * comfortably (TLS requires ~14-16KB stack headroom on ESP32).
+ *
+ * RULES:
+ *   - NEVER call any lv_* function from this task.
+ *   - NEVER dereference s_screen from this task.
+ *   - Only write to s_result_q and clear s_poll_inflight.
+ */
+static void poll_task(void* /*arg*/) {
+    PollResult result;
+    do_network_poll(result);
+
+    /* Deliver to LVGL thread — xQueueOverwrite never blocks */
+    if (s_result_q) {
+        xQueueOverwrite(s_result_q, &result);
+    }
+
+    s_poll_inflight = false;
+    s_poll_task = nullptr;
+    LOG_I("claude_w", "poll_task: done, post-task heap=%lu",
+          (unsigned long)esp_get_free_heap_size());
+    vTaskDelete(NULL);
+}
+
+/* ── trigger_poll — non-blocking, safe to call from LVGL thread ──────── */
+static void trigger_poll() {
+    if (s_poll_inflight) {
+        LOG_I("claude_w", "trigger_poll: already in flight, skipping");
+        return;
+    }
+
+    /* Lazy-init the persistent queue (created once, never deleted) */
+    if (!s_result_q) {
+        s_result_q = xQueueCreate(1, sizeof(PollResult));
+        if (!s_result_q) {
+            LOG_W("claude_w", "trigger_poll: failed to create result queue");
+            return;
+        }
+    }
+
+    s_poll_inflight = true;
+    BaseType_t ok = xTaskCreatePinnedToCore(
+        poll_task,      /* task function */
+        "clpoll",       /* name */
+        20480,          /* stack bytes — 20KB for TLS headroom */
+        nullptr,        /* arg */
+        1,              /* priority */
+        &s_poll_task,   /* handle */
+        0               /* core 0 — leaves core 1 free for LVGL/touch */
+    );
+    if (ok != pdPASS) {
+        s_poll_inflight = false;
+        LOG_W("claude_w", "trigger_poll: xTaskCreatePinnedToCore failed");
+        return;
+    }
+    LOG_I("claude_w", "trigger_poll: task spawned, free heap=%lu",
+          (unsigned long)esp_get_free_heap_size());
+}
+
+/* ── apply_cb — 250ms LVGL-thread timer, drains the result queue ──────── */
+/*
+ * Runs on the LVGL thread every 250ms.
+ * xQueueReceive(..., 0) is non-blocking — returns immediately if empty.
+ * Only applies the result if the screen is still the active screen.
+ */
+static void apply_cb(lv_timer_t* /*t*/) {
+    if (!s_result_q) return;
+    PollResult res;
+    if (xQueueReceive(s_result_q, &res, 0) == pdTRUE) {
+        if (s_screen && lv_scr_act() == s_screen) {
+            apply_result(res);
+        }
+    }
 }
 
 /* ── Screen delete event — null all widget statics and timers ──────────── */
 /*
- * Option A (screen-lifetime timers) + Option B (null guards in apply_json).
- *
- * Belt-and-suspenders approach:
- *   1. LV_EVENT_DELETE on s_screen stops timers and nulls all widget pointers
- *      so that any in-flight poll callback touching LVGL gets a clean no-op.
- *   2. poll_now() bails immediately if s_screen is nullptr — covers the case
- *      where the serial command "claude poll" fires before the user has ever
- *      opened the Claude tile (screen never created) or after they navigated
- *      away and delete_screen() was called by the app registry.
- *   3. apply_json() null-checks every label before lv_label_set_text() so
- *      a race between an in-flight HTTP response and screen destruction can't
- *      produce an assertion failure.
+ * Design choice: s_result_q is NOT deleted here.
+ * Reason: poll_task may still be mid-flight writing to the queue when the
+ * screen closes. Deleting the queue would cause a use-after-free in the task.
+ * Instead: null s_screen so apply_cb and apply_result become no-ops, and let
+ * the task finish and self-delete. The queue is reused on next screen open.
+ * A stale result sitting in the queue when the screen reopens is harmlessly
+ * consumed (or overwritten) by the next trigger_poll.
  */
 static void screen_delete_cb(lv_event_t* /*e*/) {
-    /* Stop timers so no further poll callbacks fire after screen is freed */
+    /* Stop timers so no further poll/apply callbacks fire after screen is freed */
     if (s_poll_timer)      { lv_timer_delete(s_poll_timer);      s_poll_timer      = nullptr; }
     if (s_immediate_timer) { lv_timer_delete(s_immediate_timer); s_immediate_timer = nullptr; }
-    /* Null all widget pointers — any in-flight UI update will no-op */
+    if (s_apply_timer)     { lv_timer_delete(s_apply_timer);     s_apply_timer     = nullptr; }
+    /* Null s_screen FIRST — poll_task checks this indirectly via apply_result */
     s_screen          = nullptr;
+    /* Null all widget pointers — apply_result will no-op on every widget call */
     s_dot_connected   = nullptr;
     s_lbl_model       = nullptr;
     s_bar_5h          = nullptr;
@@ -303,154 +503,26 @@ static void screen_delete_cb(lv_event_t* /*e*/) {
     s_badge_expired   = nullptr;
     s_lbl_status      = nullptr;
     s_lbl_title       = nullptr;
+    /* Note: s_poll_inflight and s_poll_task are left intact — the task
+     * will clear them when it finishes. Do not cancel/delete the task here
+     * as it may be mid-TLS and cancellation would leak the SSL context. */
     LOG_I("claude_w", "screen_delete_cb: timers stopped, widget statics nulled");
-}
-
-/* ── HTTPS poll ───────────────────────────────────────────────────────── */
-
-void poll_now() {
-    /* Guard: bail immediately if screen has never been created or was destroyed.
-     * This covers the "claude poll" serial command firing before the user opens
-     * the Claude tile, or after they navigated away. */
-    if (!s_screen) {
-        LOG_I("claude_w", "poll_now: no screen — skipping (open the Claude tile first)");
-        return;
-    }
-
-    if (!wifi_profiles::is_connected()) {
-        set_connected(false);
-        set_status("WiFi not connected");
-        LOG_W("claude_w", "poll_now: WiFi not connected");
-        return;
-    }
-
-    /* Get access token for active profile */
-    bool is_expired = false;
-    String token = claude_auth::get_active_access_token(&is_expired);
-
-    if (token.isEmpty()) {
-        if (claude_auth::profile_count() == 0) {
-            set_connected(false);
-            set_status("No Claude profile configured");
-            LOG_W("claude_w", "poll_now: no profiles configured");
-        } else {
-            set_connected(false);
-            set_status("No access token configured");
-            show_expired(true);
-            LOG_W("claude_w", "poll_now: access token is empty");
-        }
-        return;
-    }
-
-    /* If token is expired, attempt a proactive refresh before the API call */
-    if (is_expired) {
-        LOG_I("claude_w", "poll_now: token expired — attempting refresh");
-        set_status("Refreshing token...");
-        if (claude_auth::refresh_active()) {
-            LOG_I("claude_w", "poll_now: token refreshed successfully");
-            /* Re-read token after refresh */
-            token = claude_auth::get_active_access_token(&is_expired);
-            show_expired(false);
-        } else {
-            LOG_W("claude_w", "poll_now: refresh failed — attempting poll with stale token");
-            show_expired(true);
-        }
-    }
-
-    /* Log heap before HTTPS handshake */
-    LOG_I("claude_w", "pre-HTTPS heap: %lu", (unsigned long)esp_get_free_heap_size());
-
-    /* HTTPS with insecure cert (TODO: pin Anthropic CA) */
-    WiFiClientSecure client;
-    client.setInsecure();  // TODO: pin cert for production
-
-    HTTPClient http;
-    http.begin(client, ANTHROPIC_USAGE_URL);
-    http.setTimeout(10000);
-    http.addHeader("Authorization", "Bearer " + token);
-    http.addHeader("anthropic-beta", ANTHROPIC_BETA_HDR);
-    http.addHeader("Content-Type", "application/json");
-
-    int code = http.GET();
-
-    LOG_I("claude_w", "post-HTTPS heap: %lu  HTTP code=%d",
-          (unsigned long)esp_get_free_heap_size(), code);
-
-    if (code == 200) {
-        String body = http.getString();
-        http.end();
-        client.stop();
-        LOG_I("claude_w", "Poll OK (%d bytes)", body.length());
-        show_expired(false);  // successful call — clear expired badge
-        apply_json(body.c_str());
-    } else if (code == 401) {
-        http.end();
-        client.stop();
-        /* 401 = token rejected. Attempt one refresh-and-retry cycle. */
-        LOG_W("claude_w", "poll_now: 401 — attempting token refresh");
-        set_status("Token rejected — refreshing...");
-        if (claude_auth::refresh_active()) {
-            /* Retry with refreshed token */
-            token = claude_auth::get_active_access_token(nullptr);
-            WiFiClientSecure client2;
-            client2.setInsecure();
-            HTTPClient http2;
-            http2.begin(client2, ANTHROPIC_USAGE_URL);
-            http2.setTimeout(10000);
-            http2.addHeader("Authorization", "Bearer " + token);
-            http2.addHeader("anthropic-beta", ANTHROPIC_BETA_HDR);
-            http2.addHeader("Content-Type", "application/json");
-            int code2 = http2.GET();
-            if (code2 == 200) {
-                String body2 = http2.getString();
-                http2.end();
-                client2.stop();
-                show_expired(false);
-                apply_json(body2.c_str());
-                LOG_I("claude_w", "poll_now: retry after refresh succeeded");
-            } else {
-                http2.end();
-                client2.stop();
-                set_connected(false);
-                show_expired(true);
-                set_status("Auth failed — reprovision tokens");
-                LOG_W("claude_w", "poll_now: retry after refresh failed: %d", code2);
-            }
-        } else {
-            set_connected(false);
-            show_expired(true);
-            set_status("Token expired — use 'claude token set'");
-            LOG_W("claude_w", "poll_now: refresh failed, showing expired badge");
-        }
-    } else {
-        String body = http.getString();
-        http.end();
-        client.stop();
-        char err_buf[64];
-        snprintf(err_buf, sizeof(err_buf), "HTTP error: %d", code);
-        LOG_W("claude_w", "%s  body=%s", err_buf, body.substring(0, 80).c_str());
-        set_status(err_buf);
-        set_connected(false);
-    }
-
-    /* Update title to show current profile */
-    update_title();
 }
 
 /* ── Timer callbacks ──────────────────────────────────────────────────── */
 
 static void poll_cb(lv_timer_t* /*t*/) {
-    if (s_screen && lv_scr_act() == s_screen) poll_now();
+    if (s_screen && lv_scr_act() == s_screen) trigger_poll();
 }
 
 static void immediate_poll_cb(lv_timer_t* t) {
     lv_timer_delete(t);
     s_immediate_timer = nullptr;
-    if (s_screen && lv_scr_act() == s_screen) poll_now();
+    if (s_screen && lv_scr_act() == s_screen) trigger_poll();
 }
 
 static void back_cb(lv_event_t* /*e*/) { screen_router::pop(); }
-static void refresh_btn_cb(lv_event_t* /*e*/) { poll_now(); }
+static void refresh_btn_cb(lv_event_t* /*e*/) { trigger_poll(); }
 
 /* ── Layout helpers ───────────────────────────────────────────────────── */
 
@@ -525,8 +597,9 @@ static lv_obj_t* add_bar_row(lv_obj_t* parent, const char* key_text, lv_coord_t 
 /* ── Screen builder ───────────────────────────────────────────────────── */
 
 lv_obj_t* create_screen() {
-    if (s_poll_timer) { lv_timer_delete(s_poll_timer); s_poll_timer = nullptr; }
+    if (s_poll_timer)      { lv_timer_delete(s_poll_timer);      s_poll_timer      = nullptr; }
     if (s_immediate_timer) { lv_timer_delete(s_immediate_timer); s_immediate_timer = nullptr; }
+    if (s_apply_timer)     { lv_timer_delete(s_apply_timer);     s_apply_timer     = nullptr; }
     s_screen = nullptr;
 
     /* Check for legacy endpoint config and warn */
@@ -691,21 +764,41 @@ lv_obj_t* create_screen() {
     lv_label_set_text(refresh_lbl, LV_SYMBOL_REFRESH);
     lv_obj_center(refresh_lbl);
 
-    /* Timers */
-    s_poll_timer = lv_timer_create(poll_cb, 60000, NULL);
+    /* Timers:
+     *   s_poll_timer      — 60s periodic, triggers background poll
+     *   s_immediate_timer — one-shot 100ms, kicks off the first poll after load
+     *   s_apply_timer     — 250ms periodic, drains s_result_q on LVGL thread
+     */
+    s_poll_timer      = lv_timer_create(poll_cb, 60000, NULL);
     s_immediate_timer = lv_timer_create(immediate_poll_cb, 100, NULL);
     lv_timer_set_repeat_count(s_immediate_timer, 1);
+    s_apply_timer     = lv_timer_create(apply_cb, 250, NULL);
 
     /* Set title to active profile */
     update_title();
 
-    LOG_I("claude_w", "Screen created, direct HTTPS mode, timers armed");
+    LOG_I("claude_w", "Screen created, direct HTTPS mode (async), timers armed");
     return scr;
+}
+
+/* ── poll_now — public API, called by serial command ─────────────────── */
+/*
+ * Triggers a background poll. Non-blocking: returns immediately.
+ * Callers that used to rely on synchronous completion should now rely on
+ * the 250ms apply_cb drain to see widget updates.
+ */
+void poll_now() {
+    if (!s_screen) {
+        LOG_I("claude_w", "poll_now: no screen — skipping (open the Claude tile first)");
+        return;
+    }
+    trigger_poll();
 }
 
 void delete_screen() {
     if (s_poll_timer)      { lv_timer_delete(s_poll_timer);      s_poll_timer      = nullptr; }
     if (s_immediate_timer) { lv_timer_delete(s_immediate_timer); s_immediate_timer = nullptr; }
+    if (s_apply_timer)     { lv_timer_delete(s_apply_timer);     s_apply_timer     = nullptr; }
     s_screen          = nullptr;
     s_dot_connected   = nullptr;
     s_lbl_model       = nullptr;
