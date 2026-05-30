@@ -27,7 +27,7 @@ lv_obj_t* create(lv_obj_t* parent) {
     lv_obj_align(s_lbl_time, LV_ALIGN_LEFT_MID, 4, 0);
 
     s_lbl_wifi = lv_label_create(bar);
-    lv_label_set_text(s_lbl_wifi, LV_SYMBOL_WIFI);
+    lv_label_set_text(s_lbl_wifi, "WiFi");   // ASCII (glyph-safe); statusbar is currently unused
     lv_obj_align(s_lbl_wifi, LV_ALIGN_CENTER, 0, 0);
 
     s_lbl_heap = lv_label_create(bar);

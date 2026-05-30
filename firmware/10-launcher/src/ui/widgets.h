@@ -27,9 +27,11 @@ lv_obj_t* make_botbar(lv_obj_t* parent);
 
 /**
  * Create a 130×100 app tile button (card style + card_pressed on press).
- * back_cb and user_data are wired to LV_EVENT_CLICKED internally.
+ * icon is a LV_SYMBOL_* string drawn at montserrat_20 above the label;
+ * pass nullptr or "" to skip the icon.
+ * cb and user_data are wired to LV_EVENT_CLICKED internally.
  */
-lv_obj_t* make_tile(lv_obj_t* parent, const char* label,
+lv_obj_t* make_tile(lv_obj_t* parent, const char* icon, const char* label,
                     lv_event_cb_t cb, void* user_data = nullptr);
 
 /**

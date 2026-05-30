@@ -35,7 +35,7 @@ lv_obj_t* make_topbar(lv_obj_t* parent, const char* title,
                          LV_PART_MAIN | LV_STATE_PRESSED);
 
         lv_obj_t* arrow = lv_label_create(btn);
-        lv_label_set_text(arrow, LV_SYMBOL_LEFT);
+        lv_label_set_text(arrow, "<");   // ASCII back marker (glyph-safe)
         lv_obj_center(arrow);
 
         lv_obj_add_event_cb(btn, back_cb, LV_EVENT_CLICKED, NULL);
@@ -66,17 +66,35 @@ lv_obj_t* make_botbar(lv_obj_t* parent) {
 
 // ── make_tile ─────────────────────────────────────────────────────────────
 
-lv_obj_t* make_tile(lv_obj_t* parent, const char* label,
+lv_obj_t* make_tile(lv_obj_t* parent, const char* icon, const char* label,
                     lv_event_cb_t cb, void* user_data) {
     lv_obj_t* btn = lv_button_create(parent);
     lv_obj_set_size(btn, 130, 100);
     lv_obj_add_style(btn, ui_theme::style_card(), LV_PART_MAIN);
     lv_obj_add_style(btn, ui_theme::style_card_pressed(), LV_PART_MAIN | LV_STATE_PRESSED);
 
+    // Vertical flex: icon (top, title font) + text label (bottom), both centred.
+    // NOTE: `icon` must be an in-font string (ASCII mnemonic). FontAwesome
+    // LV_SYMBOL_* glyphs render as tofu boxes on this panel, so the registry
+    // uses short ASCII mnemonics — see app_registry.cpp.
+    lv_obj_set_flex_flow(btn, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(btn, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_all(btn, tok::SP_S, LV_PART_MAIN);
+    lv_obj_set_style_pad_row(btn, tok::SP_XS, LV_PART_MAIN);
+
+    // Icon label (montserrat_20 via style_title) — skipped if icon null/empty
+    if (icon != nullptr && icon[0] != '\0') {
+        lv_obj_t* ico = lv_label_create(btn);
+        lv_label_set_text(ico, icon);
+        lv_obj_add_style(ico, ui_theme::style_title(), LV_PART_MAIN);
+    }
+
+    // Text label (montserrat_14), centred and wrapped within the tile
     lv_obj_t* lbl = lv_label_create(btn);
     lv_label_set_text(lbl, label);
     lv_obj_add_style(lbl, ui_theme::style_text_value(), LV_PART_MAIN);
-    lv_obj_center(lbl);
+    lv_obj_set_width(lbl, LV_PCT(100));
+    lv_obj_set_style_text_align(lbl, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
 
     if (cb != nullptr) {
         lv_obj_add_event_cb(btn, cb, LV_EVENT_CLICKED, user_data);

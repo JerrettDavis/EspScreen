@@ -22,23 +22,25 @@
 
 namespace settings {
 
+/* ── Sub-screen pointer forward declarations ────────────────────────────── */
+static lv_obj_t* s_claude_screen = nullptr;
+static lv_obj_t* s_wifi_screen   = nullptr;
+
 /* ── Shared sub-screen cleanup ──────────────────────────────────────────── */
 /* Fires on the outgoing screen AFTER the fade-out animation completes.
  * Deleting here (deferred) avoids the use-after-free that occurs when
  * lv_obj_delete() is called before screen_router::pop() starts the fade. */
 static void subscreen_unloaded_cb(lv_event_t* e) {
     lv_obj_t* scr = (lv_obj_t*)lv_event_get_target(e);
-    lv_obj_delete_async(scr);   // safe: animation is already finished
+    if (scr == lv_scr_act()) return;          // still active — don't null/delete yet
+    if (scr == s_claude_screen) s_claude_screen = nullptr;
+    if (scr == s_wifi_screen)   s_wifi_screen   = nullptr;
+    lv_obj_delete_async(scr);                 // safe: fade-out finished
 }
 
 /* ── Claude Profiles sub-screen ─────────────────────────────────────────── */
 
-static lv_obj_t* s_claude_screen = nullptr;
-
 static void claude_profiles_back_cb(lv_event_t* /*e*/) {
-    /* Null the pointer now; actual deletion happens in subscreen_unloaded_cb
-     * after the fade-out animation finishes — avoids use-after-free hang. */
-    s_claude_screen = nullptr;
     screen_router::pop();
 }
 
@@ -102,6 +104,12 @@ static lv_obj_t* create_claude_profiles_screen() {
         "  claude token set \"Name\" <access> <refresh> <expires_sec>");
     lv_obj_add_style(hint, ui_theme::style_text_muted(), LV_PART_MAIN);
     lv_obj_set_style_text_line_space(hint, 4, 0);
+    /* Constrain to content width and wrap — the longest line otherwise sizes the
+     * label to ~430px and overflows the 320px panel (caught by the layout
+     * validator, R1 OUT_OF_BOUNDS). Same class as the claude_widget
+     * unconstrained-label bug fixed earlier. */
+    lv_obj_set_width(hint, LV_PCT(100));
+    lv_label_set_long_mode(hint, LV_LABEL_LONG_WRAP);
 
     s_claude_screen = scr;
     return scr;
@@ -109,12 +117,7 @@ static lv_obj_t* create_claude_profiles_screen() {
 
 /* ── WiFi Networks sub-screen ────────────────────────────────────────────── */
 
-static lv_obj_t* s_wifi_screen = nullptr;
-
 static void wifi_networks_back_cb(lv_event_t* /*e*/) {
-    /* Null the pointer now; actual deletion happens in subscreen_unloaded_cb
-     * after the fade-out animation finishes — avoids use-after-free hang. */
-    s_wifi_screen = nullptr;
     screen_router::pop();
 }
 
@@ -193,7 +196,7 @@ static lv_obj_t* create_wifi_networks_screen() {
     }, LV_EVENT_CLICKED, NULL);
 
     lv_obj_t* scan_lbl = lv_label_create(scan_btn);
-    lv_label_set_text(scan_lbl, LV_SYMBOL_WIFI " Scan & Add Network");
+    lv_label_set_text(scan_lbl, "Scan & Add Network");
     lv_obj_center(scan_lbl);
 
     /* Serial hint */
@@ -208,10 +211,18 @@ static lv_obj_t* create_wifi_networks_screen() {
 /* ── Tile click callbacks ────────────────────────────────────────────────── */
 
 static void claude_tile_cb(lv_event_t* /*e*/) {
+    if (s_claude_screen) {
+        LOG_W("settings", "claude tile tapped while sub-screen live — ignoring");
+        return;
+    }
     screen_router::push(create_claude_profiles_screen());
 }
 
 static void wifi_tile_cb(lv_event_t* /*e*/) {
+    if (s_wifi_screen) {
+        LOG_W("settings", "wifi tile tapped while sub-screen live — ignoring");
+        return;
+    }
     screen_router::push(create_wifi_networks_screen());
 }
 
@@ -225,6 +236,7 @@ lv_obj_t* create_screen() {
     lv_obj_t* scr = widgets::make_screen();
 
     widgets::make_topbar(scr, "Settings", settings_back_cb);
+    screen_router::attach_autodelete(scr);
 
     /* Content container — flex COLUMN, starts just below topbar */
     lv_obj_t* content = lv_obj_create(scr);
@@ -244,16 +256,16 @@ lv_obj_t* create_screen() {
     snprintf(claude_buf, sizeof(claude_buf), "(%u/%u)",
              p_count, (uint8_t)claude_auth::MAX_PROFILES);
     widgets::make_list_row(content, "Claude Profiles", claude_buf,
-                           LV_SYMBOL_RIGHT, claude_tile_cb, nullptr);
+                           ">", claude_tile_cb, nullptr);
 
     /* 2. WiFi Networks row */
     uint8_t n_count = wifi_profiles::network_count();
     char wifi_buf[48];
     snprintf(wifi_buf, sizeof(wifi_buf), "(%u/%u)%s",
              n_count, (uint8_t)wifi_profiles::MAX_NETWORKS,
-             wifi_profiles::is_connected() ? "  \xE2\x97\x8F" : "");
+             wifi_profiles::is_connected() ? "  *" : "");
     widgets::make_list_row(content, "WiFi Networks", wifi_buf,
-                           LV_SYMBOL_RIGHT, wifi_tile_cb, nullptr);
+                           ">", wifi_tile_cb, nullptr);
 
     /* 3. Divider */
     widgets::make_divider(content);
@@ -310,5 +322,14 @@ lv_obj_t* create_screen() {
 
     return scr;
 }
+
+/* ── Simulator / validator entry points ─────────────────────────────────────
+ * Expose the file-static sub-screen factories so the host harness (P2) can
+ * render them directly. Guarded by sim macros — NO effect on the device build
+ * (esp32dev defines neither ESPSCREEN_SIM nor SCREEN_VALIDATE). */
+#if defined(ESPSCREEN_SIM) || defined(SCREEN_VALIDATE)
+lv_obj_t* sim_claude_profiles_screen() { return create_claude_profiles_screen(); }
+lv_obj_t* sim_wifi_networks_screen()   { return create_wifi_networks_screen(); }
+#endif
 
 } // namespace settings

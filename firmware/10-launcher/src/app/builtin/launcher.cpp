@@ -49,7 +49,7 @@ lv_obj_t* create_screen() {
     for (int i = 0; i < app_registry::kBuiltinAppCount; i++) {
         const AppEntry* entry = &app_registry::kBuiltinApps[i];
         /* make_tile now wires the callback internally (no separate lv_obj_add_event_cb needed) */
-        widgets::make_tile(grid, entry->label, tile_click_cb, (void*)entry);
+        widgets::make_tile(grid, entry->icon, entry->label, tile_click_cb, (void*)entry);
     }
 
     Serial.printf("[launcher] create_screen() returning scr=%p\n", (void*)scr);
