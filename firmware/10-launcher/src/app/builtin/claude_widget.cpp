@@ -28,6 +28,8 @@
 #include "../../os/wifi_profiles.h"
 #include "../../os/claude_auth.h"
 #include "../../ui/widgets.h"
+#include "../../ui/theme.h"
+#include "../../ui/tokens.h"
 #include <lvgl.h>
 #include <WiFiClientSecure.h>
 #include <HTTPClient.h>
@@ -73,33 +75,17 @@ static lv_timer_t* s_apply_timer     = nullptr;  // 250ms LVGL-thread drain
 static lv_obj_t*   s_screen          = nullptr;
 
 /* ── UI element handles ───────────────────────────────────────────────── */
-static lv_obj_t* s_dot_connected    = nullptr;
-static lv_obj_t* s_lbl_model        = nullptr;
-static lv_obj_t* s_bar_5h           = nullptr;
-static lv_obj_t* s_lbl_5h_pct       = nullptr;
-static lv_obj_t* s_lbl_5h_reset     = nullptr;
-static lv_obj_t* s_bar_7d           = nullptr;
-static lv_obj_t* s_lbl_7d_pct       = nullptr;
-static lv_obj_t* s_lbl_7d_reset     = nullptr;
-static lv_obj_t* s_lbl_cost         = nullptr;
-static lv_obj_t* s_lbl_context      = nullptr;
-static lv_obj_t* s_lbl_cache_ttl    = nullptr;
-static lv_obj_t* s_headroom_cont    = nullptr;
-static lv_obj_t* s_lbl_tokens_saved = nullptr;
-static lv_obj_t* s_lbl_compression  = nullptr;
-static lv_obj_t* s_lbl_updated      = nullptr;
-static lv_obj_t* s_badge_stale      = nullptr;
-static lv_obj_t* s_badge_expired    = nullptr;  // "Token expired" badge
-static lv_obj_t* s_lbl_status       = nullptr;
-static lv_obj_t* s_lbl_title        = nullptr;  // top-bar title (shows profile name)
+static lv_obj_t*       s_dot_connected = nullptr;
+static lv_obj_t*       s_lbl_model     = nullptr;
+static widgets::BarRow s_row_5h        = {};
+static widgets::BarRow s_row_7d        = {};
+static lv_obj_t*       s_lbl_updated   = nullptr;
+static lv_obj_t*       s_badge_stale   = nullptr;
+static lv_obj_t*       s_badge_expired = nullptr;  // "Token expired" badge
+static lv_obj_t*       s_lbl_status    = nullptr;
+static lv_obj_t*       s_lbl_title     = nullptr;  // top-bar title (shows profile name)
 
 /* ── Helpers ──────────────────────────────────────────────────────────── */
-
-static lv_color_t bar_color(int util) {
-    if (util >= 85) return lv_color_hex(0xEF4444);
-    if (util >= 60) return lv_color_hex(0xFBBF24);
-    return lv_color_hex(0x4ADE80);
-}
 
 static void fmt_duration(char* buf, size_t n, int32_t secs) {
     if (secs <= 0) {
@@ -111,13 +97,6 @@ static void fmt_duration(char* buf, size_t n, int32_t secs) {
     } else {
         snprintf(buf, n, "%dd %dh", (int)(secs / 86400), (int)((secs % 86400) / 3600));
     }
-}
-
-static void set_bar_value(lv_obj_t* bar, int pct) {
-    if (!bar) return;
-    pct = pct < 0 ? 0 : (pct > 100 ? 100 : pct);
-    lv_bar_set_value(bar, pct, LV_ANIM_ON);
-    lv_obj_set_style_bg_color(bar, bar_color(pct), LV_PART_INDICATOR);
 }
 
 static void show_stale(bool stale) {
@@ -135,7 +114,7 @@ static void show_expired(bool expired) {
 static void set_connected(bool ok) {
     if (!s_dot_connected) return;
     lv_obj_set_style_bg_color(s_dot_connected,
-        ok ? lv_color_hex(0x4ADE80) : lv_color_hex(0xEF4444), 0);
+        ok ? lv_color_hex(tok::SUCCESS) : lv_color_hex(tok::ERROR_), 0);
 }
 
 static void set_status(const char* msg) {
@@ -207,28 +186,19 @@ static void apply_result(const PollResult& res) {
     show_stale(false);
     show_expired(false);
 
-    set_bar_value(s_bar_5h, res.pct5h);
-    char pct_buf[16];
-    snprintf(pct_buf, sizeof(pct_buf), "%d%%", res.pct5h);
-    if (s_lbl_5h_pct)   lv_label_set_text(s_lbl_5h_pct, pct_buf);
+    /* 5-hour bar */
+    widgets::bar_set(s_row_5h.bar, s_row_5h.pct, res.pct5h);
     char reset_buf[40];
     snprintf(reset_buf, sizeof(reset_buf), "Resets in %s", res.reset5h);
-    if (s_lbl_5h_reset) lv_label_set_text(s_lbl_5h_reset, reset_buf);
+    if (s_row_5h.reset) lv_label_set_text(s_row_5h.reset, reset_buf);
 
-    set_bar_value(s_bar_7d, res.pct7d);
-    snprintf(pct_buf, sizeof(pct_buf), "%d%%", res.pct7d);
-    if (s_lbl_7d_pct)   lv_label_set_text(s_lbl_7d_pct, pct_buf);
+    /* 7-day bar */
+    widgets::bar_set(s_row_7d.bar, s_row_7d.pct, res.pct7d);
     snprintf(reset_buf, sizeof(reset_buf), "Resets in %s", res.reset7d);
-    if (s_lbl_7d_reset) lv_label_set_text(s_lbl_7d_reset, reset_buf);
+    if (s_row_7d.reset) lv_label_set_text(s_row_7d.reset, reset_buf);
 
-    /* Session fields — not present in the usage API, show placeholders */
-    if (s_lbl_model)     lv_label_set_text(s_lbl_model, "Claude");
-    if (s_lbl_cost)      lv_label_set_text(s_lbl_cost, "---");
-    if (s_lbl_context)   lv_label_set_text(s_lbl_context, "---");
-    if (s_lbl_cache_ttl) lv_label_set_text(s_lbl_cache_ttl, "---");
-
-    /* Headroom — not available in direct-API mode */
-    if (s_headroom_cont) lv_obj_add_flag(s_headroom_cont, LV_OBJ_FLAG_HIDDEN);
+    /* Model name */
+    if (s_lbl_model) lv_label_set_text(s_lbl_model, "Claude");
 
     update_title();
     stamp_update_time();
@@ -486,18 +456,8 @@ static void screen_delete_cb(lv_event_t* /*e*/) {
     /* Null all widget pointers — apply_result will no-op on every widget call */
     s_dot_connected   = nullptr;
     s_lbl_model       = nullptr;
-    s_bar_5h          = nullptr;
-    s_lbl_5h_pct      = nullptr;
-    s_lbl_5h_reset    = nullptr;
-    s_bar_7d          = nullptr;
-    s_lbl_7d_pct      = nullptr;
-    s_lbl_7d_reset    = nullptr;
-    s_lbl_cost        = nullptr;
-    s_lbl_context     = nullptr;
-    s_lbl_cache_ttl   = nullptr;
-    s_headroom_cont   = nullptr;
-    s_lbl_tokens_saved= nullptr;
-    s_lbl_compression = nullptr;
+    s_row_5h          = {};
+    s_row_7d          = {};
     s_lbl_updated     = nullptr;
     s_badge_stale     = nullptr;
     s_badge_expired   = nullptr;
@@ -524,76 +484,6 @@ static void immediate_poll_cb(lv_timer_t* t) {
 static void back_cb(lv_event_t* /*e*/) { screen_router::pop(); }
 static void refresh_btn_cb(lv_event_t* /*e*/) { trigger_poll(); }
 
-/* ── Layout helpers ───────────────────────────────────────────────────── */
-
-static lv_obj_t* add_divider(lv_obj_t* parent, lv_coord_t y) {
-    lv_obj_t* line = lv_obj_create(parent);
-    lv_obj_set_size(line, 290, 1);
-    lv_obj_align(line, LV_ALIGN_TOP_MID, 0, y);
-    lv_obj_set_style_bg_color(line, lv_color_hex(0x444466), 0);
-    lv_obj_set_style_border_width(line, 0, 0);
-    lv_obj_set_style_pad_all(line, 0, 0);
-    return line;
-}
-
-static lv_obj_t* add_kv_row(lv_obj_t* parent, const char* key_text,
-                              lv_coord_t y, lv_obj_t** val_label_out) {
-    lv_obj_t* key = lv_label_create(parent);
-    lv_label_set_text(key, key_text);
-    lv_obj_set_style_text_font(key, &lv_font_montserrat_14, 0);
-    lv_obj_set_style_text_color(key, lv_color_hex(0xaaaacc), 0);
-    lv_obj_align(key, LV_ALIGN_TOP_LEFT, 15, y);
-
-    lv_obj_t* val = lv_label_create(parent);
-    lv_label_set_text(val, "---");
-    lv_obj_set_style_text_font(val, &lv_font_montserrat_14, 0);
-    lv_obj_set_style_text_color(val, lv_color_hex(0xffffff), 0);
-    lv_obj_align(val, LV_ALIGN_TOP_RIGHT, -15, y);
-    *val_label_out = val;
-    return key;
-}
-
-static void add_section_label(lv_obj_t* parent, const char* text, lv_coord_t y) {
-    lv_obj_t* lbl = lv_label_create(parent);
-    lv_label_set_text(lbl, text);
-    lv_obj_set_style_text_font(lbl, &lv_font_montserrat_14, 0);
-    lv_obj_set_style_text_color(lbl, lv_color_hex(0x8888aa), 0);
-    lv_obj_align(lbl, LV_ALIGN_TOP_MID, 0, y);
-}
-
-static lv_obj_t* add_bar_row(lv_obj_t* parent, const char* key_text, lv_coord_t y,
-                               lv_obj_t** pct_label_out, lv_obj_t** reset_label_out) {
-    lv_obj_t* key = lv_label_create(parent);
-    lv_label_set_text(key, key_text);
-    lv_obj_set_style_text_font(key, &lv_font_montserrat_14, 0);
-    lv_obj_set_style_text_color(key, lv_color_hex(0xaaaacc), 0);
-    lv_obj_align(key, LV_ALIGN_TOP_LEFT, 15, y);
-
-    lv_obj_t* pct = lv_label_create(parent);
-    lv_label_set_text(pct, "0%");
-    lv_obj_set_style_text_font(pct, &lv_font_montserrat_14, 0);
-    lv_obj_set_style_text_color(pct, lv_color_hex(0xffffff), 0);
-    lv_obj_align(pct, LV_ALIGN_TOP_RIGHT, -15, y);
-    *pct_label_out = pct;
-
-    lv_obj_t* bar = lv_bar_create(parent);
-    lv_obj_set_size(bar, 290, 14);
-    lv_obj_align(bar, LV_ALIGN_TOP_MID, 0, y + 18);
-    lv_bar_set_range(bar, 0, 100);
-    lv_bar_set_value(bar, 0, LV_ANIM_OFF);
-    lv_obj_set_style_bg_color(bar, lv_color_hex(0x333355), 0);
-    lv_obj_set_style_bg_color(bar, lv_color_hex(0x4ADE80), LV_PART_INDICATOR);
-
-    lv_obj_t* reset = lv_label_create(parent);
-    lv_label_set_text(reset, "Resets in --");
-    lv_obj_set_style_text_font(reset, &lv_font_montserrat_14, 0);
-    lv_obj_set_style_text_color(reset, lv_color_hex(0x888899), 0);
-    lv_obj_align(reset, LV_ALIGN_TOP_LEFT, 15, y + 36);
-    *reset_label_out = reset;
-
-    return bar;
-}
-
 /* ── Screen builder ───────────────────────────────────────────────────── */
 
 lv_obj_t* create_screen() {
@@ -608,157 +498,81 @@ lv_obj_t* create_screen() {
         LOG_I("claude_w", "Legacy 'endpoint' config ignored — using direct OAuth path");
     }
 
-    lv_obj_t* scr = lv_obj_create(NULL);
-    lv_obj_set_size(scr, LV_HOR_RES, LV_VER_RES);
-    lv_obj_set_style_bg_color(scr, lv_color_hex(0x0d0d1a), 0);
-    lv_obj_set_style_border_width(scr, 0, 0);
-    lv_obj_set_style_pad_all(scr, 0, 0);
+    /* ── Screen ──────────────────────────────────────────────────────────── */
+    lv_obj_t* scr = widgets::make_screen();
     s_screen = scr;
 
     /* Register delete callback so timers and widget statics are nulled if
      * LVGL frees this screen (e.g. lv_obj_del called from outside this widget). */
     lv_obj_add_event_cb(scr, screen_delete_cb, LV_EVENT_DELETE, nullptr);
 
-    /* ── Top bar ──────────────────────────────────────────────────────── */
-    lv_obj_t* topbar = lv_obj_create(scr);
-    lv_obj_set_size(topbar, LV_HOR_RES, 36);
-    lv_obj_align(topbar, LV_ALIGN_TOP_MID, 0, 0);
-    lv_obj_set_style_bg_color(topbar, lv_color_hex(0x1a1a2e), 0);
-    lv_obj_set_style_border_width(topbar, 0, 0);
-    lv_obj_set_style_pad_all(topbar, 0, 0);
-    lv_obj_set_style_radius(topbar, 0, 0);
+    /* ── Top bar ─────────────────────────────────────────────────────────── */
+    lv_obj_t* topbar = widgets::make_topbar(scr, "Claude Usage", back_cb, &s_lbl_title);
 
-    lv_obj_t* back_btn = lv_button_create(topbar);
-    lv_obj_set_size(back_btn, 48, 28);
-    lv_obj_align(back_btn, LV_ALIGN_LEFT_MID, 4, 0);
-    lv_obj_set_style_radius(back_btn, 6, 0);
-    lv_obj_add_event_cb(back_btn, back_cb, LV_EVENT_CLICKED, NULL);
-    lv_obj_t* back_lbl = lv_label_create(back_btn);
-    lv_label_set_text(back_lbl, LV_SYMBOL_LEFT);
-    lv_obj_center(back_lbl);
+    /* Connection dot — right side of topbar */
+    s_dot_connected = widgets::make_status_dot(topbar, tok::ERROR_);
+    lv_obj_align(s_dot_connected, LV_ALIGN_RIGHT_MID, -tok::SP_M, 0);
 
-    /* Title — shows active profile name */
-    s_lbl_title = lv_label_create(topbar);
-    lv_label_set_text(s_lbl_title, "Claude Usage");
-    lv_obj_set_style_text_font(s_lbl_title, &lv_font_montserrat_14, 0);
-    lv_obj_set_style_text_color(s_lbl_title, lv_color_hex(0xffffff), 0);
-    lv_obj_align(s_lbl_title, LV_ALIGN_CENTER, 0, 0);
-
-    /* Stale badge */
+    /* Stale badge — near right of topbar, hidden by default */
     s_badge_stale = lv_label_create(topbar);
     lv_label_set_text(s_badge_stale, "stale!");
-    lv_obj_set_style_text_color(s_badge_stale, lv_color_hex(0xEF4444), 0);
-    lv_obj_set_style_text_font(s_badge_stale, &lv_font_montserrat_14, 0);
-    lv_obj_align(s_badge_stale, LV_ALIGN_RIGHT_MID, -6, 0);
+    lv_obj_set_style_text_color(s_badge_stale, lv_color_hex(tok::ERROR_), 0);
+    lv_obj_add_style(s_badge_stale, ui_theme::style_topbar_title(), 0);
+    lv_obj_align(s_badge_stale, LV_ALIGN_RIGHT_MID, -(tok::SP_M + 20), 0);
     lv_obj_add_flag(s_badge_stale, LV_OBJ_FLAG_HIDDEN);
 
-    /* ── Content area ─────────────────────────────────────────────────── */
-    lv_coord_t y = 44;
+    /* ── Content area — sits between topbar and botbar ───────────────────── */
+    /* y offset: below topbar + SP_S gap */
+    lv_coord_t y = tok::TOPBAR_H + tok::SP_S;
 
-    s_lbl_model = lv_label_create(scr);
-    lv_label_set_text(s_lbl_model, "---");
-    lv_obj_set_style_text_font(s_lbl_model, &lv_font_montserrat_14, 0);
-    lv_obj_set_style_text_color(s_lbl_model, lv_color_hex(0xddddff), 0);
-    lv_obj_align(s_lbl_model, LV_ALIGN_TOP_LEFT, 15, y);
-
-    s_dot_connected = lv_obj_create(scr);
-    lv_obj_set_size(s_dot_connected, 12, 12);
-    lv_obj_align(s_dot_connected, LV_ALIGN_TOP_RIGHT, -15, y + 2);
-    lv_obj_set_style_radius(s_dot_connected, LV_RADIUS_CIRCLE, 0);
-    lv_obj_set_style_bg_color(s_dot_connected, lv_color_hex(0xEF4444), 0);
-    lv_obj_set_style_border_width(s_dot_connected, 0, 0);
-    lv_obj_set_style_pad_all(s_dot_connected, 0, 0);
-
-    y += 20;
-    add_divider(scr, y);
-
-    /* Token expired badge — below top divider */
-    y += 6;
+    /* Token expired badge — centered, hidden by default */
     s_badge_expired = lv_label_create(scr);
     lv_label_set_text(s_badge_expired, "Token expired — use 'claude token set'");
     lv_obj_set_style_text_font(s_badge_expired, &lv_font_montserrat_14, 0);
-    lv_obj_set_style_text_color(s_badge_expired, lv_color_hex(0xEF4444), 0);
+    lv_obj_set_style_text_color(s_badge_expired, lv_color_hex(tok::ERROR_), 0);
     lv_obj_align(s_badge_expired, LV_ALIGN_TOP_MID, 0, y);
     lv_obj_add_flag(s_badge_expired, LV_OBJ_FLAG_HIDDEN);
+    y += 18;
 
     /* Status/error line */
-    y += 14;
     s_lbl_status = lv_label_create(scr);
     lv_label_set_text(s_lbl_status, "");
     lv_obj_set_style_text_font(s_lbl_status, &lv_font_montserrat_14, 0);
-    lv_obj_set_style_text_color(s_lbl_status, lv_color_hex(0xEF4444), 0);
+    lv_obj_set_style_text_color(s_lbl_status, lv_color_hex(tok::ERROR_), 0);
     lv_obj_align(s_lbl_status, LV_ALIGN_TOP_MID, 0, y);
+    y += tok::SP_L;
 
-    /* 5-hour bar */
-    y += 6;
-    s_bar_5h = add_bar_row(scr, "5-hour limit", y, &s_lbl_5h_pct, &s_lbl_5h_reset);
-    y += 56;
+    /* ── HERO: 5-hour bar row ─────────────────────────────────────────────── */
+    widgets::BarRow row5 = widgets::make_bar_row(scr, "5-hour limit");
+    lv_obj_align(row5.bar, LV_ALIGN_TOP_MID, 0, y + 20);
+    s_row_5h = row5;
+    y += 56 + tok::SP_L;
 
-    /* 7-day bar */
-    s_bar_7d = add_bar_row(scr, "7-day limit", y, &s_lbl_7d_pct, &s_lbl_7d_reset);
-    y += 56;
+    /* ── HERO: 7-day bar row ──────────────────────────────────────────────── */
+    widgets::BarRow row7 = widgets::make_bar_row(scr, "7-day limit");
+    lv_obj_align(row7.bar, LV_ALIGN_TOP_MID, 0, y + 20);
+    s_row_7d = row7;
+    y += 56 + tok::SP_L;
 
-    /* Session section */
-    add_divider(scr, y);
-    y += 6;
-    add_section_label(scr, "--- This session ---", y);
-    y += 18;
-    add_kv_row(scr, "Cost", y, &s_lbl_cost);          y += 18;
-    add_kv_row(scr, "Context used", y, &s_lbl_context); y += 18;
-    add_kv_row(scr, "Cache TTL", y, &s_lbl_cache_ttl);  y += 22;
+    /* ── Model name kv row ────────────────────────────────────────────────── */
+    widgets::make_divider(scr);
+    y += tok::SP_S;
+    s_lbl_model = widgets::make_kv_row(scr, "Model");
 
-    /* Headroom section (hidden — not available in direct-API mode) */
-    add_divider(scr, y);
-    y += 6;
-    s_headroom_cont = lv_obj_create(scr);
-    lv_obj_set_size(s_headroom_cont, LV_HOR_RES, 58);
-    lv_obj_align(s_headroom_cont, LV_ALIGN_TOP_MID, 0, y);
-    lv_obj_set_style_bg_opa(s_headroom_cont, LV_OPA_0, 0);
-    lv_obj_set_style_border_width(s_headroom_cont, 0, 0);
-    lv_obj_set_style_pad_all(s_headroom_cont, 0, 0);
-    lv_obj_add_flag(s_headroom_cont, LV_OBJ_FLAG_HIDDEN);
+    /* ── Bottom bar ──────────────────────────────────────────────────────── */
+    lv_obj_t* botbar = widgets::make_botbar(scr);
 
-    lv_obj_t* hr_key1 = lv_label_create(s_headroom_cont);
-    lv_label_set_text(hr_key1, "Tokens saved");
-    lv_obj_set_style_text_font(hr_key1, &lv_font_montserrat_14, 0);
-    lv_obj_set_style_text_color(hr_key1, lv_color_hex(0xaaaacc), 0);
-    lv_obj_align(hr_key1, LV_ALIGN_TOP_LEFT, 15, 18);
-    s_lbl_tokens_saved = lv_label_create(s_headroom_cont);
-    lv_label_set_text(s_lbl_tokens_saved, "---");
-    lv_obj_set_style_text_font(s_lbl_tokens_saved, &lv_font_montserrat_14, 0);
-    lv_obj_set_style_text_color(s_lbl_tokens_saved, lv_color_hex(0xffffff), 0);
-    lv_obj_align(s_lbl_tokens_saved, LV_ALIGN_TOP_RIGHT, -15, 18);
-    lv_obj_t* hr_key2 = lv_label_create(s_headroom_cont);
-    lv_label_set_text(hr_key2, "Compression");
-    lv_obj_set_style_text_font(hr_key2, &lv_font_montserrat_14, 0);
-    lv_obj_set_style_text_color(hr_key2, lv_color_hex(0xaaaacc), 0);
-    lv_obj_align(hr_key2, LV_ALIGN_TOP_LEFT, 15, 36);
-    s_lbl_compression = lv_label_create(s_headroom_cont);
-    lv_label_set_text(s_lbl_compression, "---");
-    lv_obj_set_style_text_font(s_lbl_compression, &lv_font_montserrat_14, 0);
-    lv_obj_set_style_text_color(s_lbl_compression, lv_color_hex(0xffffff), 0);
-    lv_obj_align(s_lbl_compression, LV_ALIGN_TOP_RIGHT, -15, 36);
-    y += 64;
-
-    /* Bottom bar */
-    lv_obj_t* bot_bar = lv_obj_create(scr);
-    lv_obj_set_size(bot_bar, LV_HOR_RES, 36);
-    lv_obj_align(bot_bar, LV_ALIGN_BOTTOM_MID, 0, 0);
-    lv_obj_set_style_bg_color(bot_bar, lv_color_hex(0x1a1a2e), 0);
-    lv_obj_set_style_border_width(bot_bar, 0, 0);
-    lv_obj_set_style_pad_all(bot_bar, 0, 0);
-    lv_obj_set_style_radius(bot_bar, 0, 0);
-
-    s_lbl_updated = lv_label_create(bot_bar);
+    /* Timestamp label — left side */
+    s_lbl_updated = lv_label_create(botbar);
     lv_label_set_text(s_lbl_updated, "Updated --:--:--");
-    lv_obj_set_style_text_font(s_lbl_updated, &lv_font_montserrat_14, 0);
-    lv_obj_set_style_text_color(s_lbl_updated, lv_color_hex(0x888899), 0);
-    lv_obj_align(s_lbl_updated, LV_ALIGN_LEFT_MID, 8, 0);
+    lv_obj_add_style(s_lbl_updated, ui_theme::style_text_muted(), 0);
+    lv_obj_align(s_lbl_updated, LV_ALIGN_LEFT_MID, tok::SP_S, 0);
 
-    lv_obj_t* refresh_btn = lv_button_create(bot_bar);
-    lv_obj_set_size(refresh_btn, 36, 28);
-    lv_obj_align(refresh_btn, LV_ALIGN_RIGHT_MID, -4, 0);
-    lv_obj_set_style_radius(refresh_btn, 6, 0);
+    /* Refresh button — right side (ghost style, ~40×32) */
+    lv_obj_t* refresh_btn = lv_button_create(botbar);
+    lv_obj_set_size(refresh_btn, 40, 32);
+    lv_obj_align(refresh_btn, LV_ALIGN_RIGHT_MID, -tok::SP_S, 0);
+    lv_obj_add_style(refresh_btn, ui_theme::style_btn_ghost(), 0);
     lv_obj_add_event_cb(refresh_btn, refresh_btn_cb, LV_EVENT_CLICKED, NULL);
     lv_obj_t* refresh_lbl = lv_label_create(refresh_btn);
     lv_label_set_text(refresh_lbl, LV_SYMBOL_REFRESH);
@@ -802,18 +616,8 @@ void delete_screen() {
     s_screen          = nullptr;
     s_dot_connected   = nullptr;
     s_lbl_model       = nullptr;
-    s_bar_5h          = nullptr;
-    s_lbl_5h_pct      = nullptr;
-    s_lbl_5h_reset    = nullptr;
-    s_bar_7d          = nullptr;
-    s_lbl_7d_pct      = nullptr;
-    s_lbl_7d_reset    = nullptr;
-    s_lbl_cost        = nullptr;
-    s_lbl_context     = nullptr;
-    s_lbl_cache_ttl   = nullptr;
-    s_headroom_cont   = nullptr;
-    s_lbl_tokens_saved= nullptr;
-    s_lbl_compression = nullptr;
+    s_row_5h          = {};
+    s_row_7d          = {};
     s_lbl_updated     = nullptr;
     s_badge_stale     = nullptr;
     s_badge_expired   = nullptr;

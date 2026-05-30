@@ -1,8 +1,8 @@
 /**
  * settings.cpp — Settings screen with Claude Profiles and WiFi Networks tiles.
  *
- * v1: Edit/Add/Delete operations use serial commands.
- *     These tiles show current state and instruct user to use serial for changes.
+ * v2: Migrated to shared UI component library (widgets / tokens / theme).
+ *     Edit/Add/Delete operations use serial commands.
  */
 
 #include "settings.h"
@@ -11,6 +11,8 @@
 #include "../../os/claude_auth.h"
 #include "../../os/wifi_profiles.h"
 #include "../../ui/widgets.h"
+#include "../../ui/theme.h"
+#include "../../ui/tokens.h"
 #include "../../os/logger.h"
 #if __has_include("os/net_manager.h")
 #  include "os/net_manager.h"
@@ -20,12 +22,7 @@
 
 namespace settings {
 
-/* ── Back callback ──────────────────────────────────────────────────── */
-static void back_cb(lv_event_t* /*e*/) {
-    screen_router::pop();
-}
-
-/* ── Shared sub-screen cleanup ──────────────────────────────────────── */
+/* ── Shared sub-screen cleanup ──────────────────────────────────────────── */
 /* Fires on the outgoing screen AFTER the fade-out animation completes.
  * Deleting here (deferred) avoids the use-after-free that occurs when
  * lv_obj_delete() is called before screen_router::pop() starts the fade. */
@@ -34,7 +31,7 @@ static void subscreen_unloaded_cb(lv_event_t* e) {
     lv_obj_delete_async(scr);   // safe: animation is already finished
 }
 
-/* ── Claude Profiles sub-screen ─────────────────────────────────────── */
+/* ── Claude Profiles sub-screen ─────────────────────────────────────────── */
 
 static lv_obj_t* s_claude_screen = nullptr;
 
@@ -46,85 +43,71 @@ static void claude_profiles_back_cb(lv_event_t* /*e*/) {
 }
 
 static lv_obj_t* create_claude_profiles_screen() {
-    lv_obj_t* scr = lv_obj_create(NULL);
+    lv_obj_t* scr = widgets::make_screen();
     lv_obj_add_event_cb(scr, subscreen_unloaded_cb, LV_EVENT_SCREEN_UNLOADED, NULL);
-    lv_obj_set_size(scr, LV_HOR_RES, LV_VER_RES);
-    lv_obj_set_style_bg_color(scr, lv_color_hex(0x0d0d1a), 0);
-    lv_obj_set_style_border_width(scr, 0, 0);
-    lv_obj_set_style_pad_all(scr, 0, 0);
 
-    /* Top bar */
-    lv_obj_t* topbar = lv_obj_create(scr);
-    lv_obj_set_size(topbar, LV_HOR_RES, 36);
-    lv_obj_align(topbar, LV_ALIGN_TOP_MID, 0, 0);
-    lv_obj_set_style_bg_color(topbar, lv_color_hex(0x1a1a2e), 0);
-    lv_obj_set_style_border_width(topbar, 0, 0);
-    lv_obj_set_style_pad_all(topbar, 0, 0);
-    lv_obj_set_style_radius(topbar, 0, 0);
+    widgets::make_topbar(scr, "Claude Profiles", claude_profiles_back_cb);
 
-    lv_obj_t* back_btn = lv_button_create(topbar);
-    lv_obj_set_size(back_btn, 48, 28);
-    lv_obj_align(back_btn, LV_ALIGN_LEFT_MID, 4, 0);
-    lv_obj_set_style_radius(back_btn, 6, 0);
-    lv_obj_add_event_cb(back_btn, claude_profiles_back_cb, LV_EVENT_CLICKED, NULL);
-    lv_obj_t* back_lbl = lv_label_create(back_btn);
-    lv_label_set_text(back_lbl, LV_SYMBOL_LEFT);
-    lv_obj_center(back_lbl);
+    /* Content container — flex COLUMN, below topbar */
+    lv_obj_t* content = lv_obj_create(scr);
+    lv_obj_set_size(content, LV_HOR_RES, LV_SIZE_CONTENT);
+    lv_obj_set_pos(content, 0, tok::TOPBAR_H);
+    lv_obj_set_style_bg_opa(content, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(content, 0, 0);
+    lv_obj_set_style_pad_all(content, tok::SCREEN_PAD, 0);
+    lv_obj_set_style_pad_row(content, tok::SP_M, 0);
+    lv_obj_set_layout(content, LV_LAYOUT_FLEX);
+    lv_obj_set_flex_flow(content, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(content, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
 
-    lv_obj_t* title = lv_label_create(topbar);
-    lv_label_set_text(title, "Claude Profiles");
-    lv_obj_set_style_text_font(title, &lv_font_montserrat_14, 0);
-    lv_obj_set_style_text_color(title, lv_color_hex(0xffffff), 0);
-    lv_obj_align(title, LV_ALIGN_CENTER, 0, 0);
-
-    /* Profile list */
-    lv_coord_t y = 44;
     uint8_t count = claude_auth::profile_count();
     uint8_t active = claude_auth::active_index();
 
     if (count == 0) {
-        lv_obj_t* lbl = lv_label_create(scr);
+        lv_obj_t* lbl = lv_label_create(content);
         lv_label_set_text(lbl, "No profiles configured.");
-        lv_obj_set_style_text_color(lbl, lv_color_hex(0x888899), 0);
-        lv_obj_align(lbl, LV_ALIGN_TOP_MID, 0, y);
-        y += 20;
+        lv_obj_add_style(lbl, ui_theme::style_text_muted(), LV_PART_MAIN);
     } else {
         for (uint8_t i = 0; i < count && i < claude_auth::MAX_PROFILES; i++) {
             claude_auth::Profile p;
             if (!claude_auth::load_profile(i, p)) continue;
 
             char row_buf[64];
-            snprintf(row_buf, sizeof(row_buf), "%s%u: %s",
-                     (i == active) ? "* " : "  ", i, p.label);
+            snprintf(row_buf, sizeof(row_buf), "%u: %s", i, p.label);
 
-            lv_obj_t* row_lbl = lv_label_create(scr);
-            lv_label_set_text(row_lbl, row_buf);
-            lv_obj_set_style_text_font(row_lbl, &lv_font_montserrat_14, 0);
-            lv_obj_set_style_text_color(row_lbl,
-                (i == active) ? lv_color_hex(0x4ADE80) : lv_color_hex(0xddddff), 0);
-            lv_obj_align(row_lbl, LV_ALIGN_TOP_LEFT, 15, y);
-            y += 20;
+            lv_obj_t* row = widgets::make_list_row(content, row_buf,
+                                                   nullptr, nullptr,
+                                                   nullptr, nullptr);
+
+            if (i == active) {
+                /* Status dot for active profile */
+                widgets::make_status_dot(row, tok::SUCCESS);
+                /* Color the label SUCCESS */
+                lv_obj_t* row_lbl = lv_obj_get_child(row, 0);
+                if (row_lbl) {
+                    lv_obj_set_style_text_color(row_lbl,
+                        lv_color_hex(tok::SUCCESS), LV_PART_MAIN);
+                }
+            }
         }
     }
 
-    y += 10;
-    lv_obj_t* hint = lv_label_create(scr);
+    /* Serial hint at the bottom */
+    lv_obj_t* hint = lv_label_create(content);
     lv_label_set_text(hint,
         "Use serial to manage profiles:\n"
         "  claude profile add \"Name\"\n"
         "  claude profile list\n"
         "  claude profile use \"Name\"\n"
         "  claude token set \"Name\" <access> <refresh> <expires_sec>");
-    lv_obj_set_style_text_font(hint, &lv_font_montserrat_14, 0);
-    lv_obj_set_style_text_color(hint, lv_color_hex(0x888899), 0);
+    lv_obj_add_style(hint, ui_theme::style_text_muted(), LV_PART_MAIN);
     lv_obj_set_style_text_line_space(hint, 4, 0);
-    lv_obj_align(hint, LV_ALIGN_TOP_LEFT, 15, y);
 
     s_claude_screen = scr;
     return scr;
 }
 
-/* ── WiFi Networks sub-screen ────────────────────────────────────────── */
+/* ── WiFi Networks sub-screen ────────────────────────────────────────────── */
 
 static lv_obj_t* s_wifi_screen = nullptr;
 
@@ -136,48 +119,30 @@ static void wifi_networks_back_cb(lv_event_t* /*e*/) {
 }
 
 static lv_obj_t* create_wifi_networks_screen() {
-    lv_obj_t* scr = lv_obj_create(NULL);
+    lv_obj_t* scr = widgets::make_screen();
     lv_obj_add_event_cb(scr, subscreen_unloaded_cb, LV_EVENT_SCREEN_UNLOADED, NULL);
-    lv_obj_set_size(scr, LV_HOR_RES, LV_VER_RES);
-    lv_obj_set_style_bg_color(scr, lv_color_hex(0x0d0d1a), 0);
-    lv_obj_set_style_border_width(scr, 0, 0);
-    lv_obj_set_style_pad_all(scr, 0, 0);
 
-    /* Top bar */
-    lv_obj_t* topbar = lv_obj_create(scr);
-    lv_obj_set_size(topbar, LV_HOR_RES, 36);
-    lv_obj_align(topbar, LV_ALIGN_TOP_MID, 0, 0);
-    lv_obj_set_style_bg_color(topbar, lv_color_hex(0x1a1a2e), 0);
-    lv_obj_set_style_border_width(topbar, 0, 0);
-    lv_obj_set_style_pad_all(topbar, 0, 0);
-    lv_obj_set_style_radius(topbar, 0, 0);
+    widgets::make_topbar(scr, "WiFi Networks", wifi_networks_back_cb);
 
-    lv_obj_t* back_btn = lv_button_create(topbar);
-    lv_obj_set_size(back_btn, 48, 28);
-    lv_obj_align(back_btn, LV_ALIGN_LEFT_MID, 4, 0);
-    lv_obj_set_style_radius(back_btn, 6, 0);
-    lv_obj_add_event_cb(back_btn, wifi_networks_back_cb, LV_EVENT_CLICKED, NULL);
-    lv_obj_t* back_lbl = lv_label_create(back_btn);
-    lv_label_set_text(back_lbl, LV_SYMBOL_LEFT);
-    lv_obj_center(back_lbl);
+    /* Content container — flex COLUMN, below topbar */
+    lv_obj_t* content = lv_obj_create(scr);
+    lv_obj_set_size(content, LV_HOR_RES, LV_SIZE_CONTENT);
+    lv_obj_set_pos(content, 0, tok::TOPBAR_H);
+    lv_obj_set_style_bg_opa(content, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(content, 0, 0);
+    lv_obj_set_style_pad_all(content, tok::SCREEN_PAD, 0);
+    lv_obj_set_style_pad_row(content, tok::SP_M, 0);
+    lv_obj_set_layout(content, LV_LAYOUT_FLEX);
+    lv_obj_set_flex_flow(content, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(content, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
 
-    lv_obj_t* title = lv_label_create(topbar);
-    lv_label_set_text(title, "WiFi Networks");
-    lv_obj_set_style_text_font(title, &lv_font_montserrat_14, 0);
-    lv_obj_set_style_text_color(title, lv_color_hex(0xffffff), 0);
-    lv_obj_align(title, LV_ALIGN_CENTER, 0, 0);
-
-    /* Network list */
-    lv_coord_t y = 44;
     uint8_t count = wifi_profiles::network_count();
     String connected_ssid = wifi_profiles::get_ssid();
 
     if (count == 0) {
-        lv_obj_t* lbl = lv_label_create(scr);
+        lv_obj_t* lbl = lv_label_create(content);
         lv_label_set_text(lbl, "No networks configured.");
-        lv_obj_set_style_text_color(lbl, lv_color_hex(0x888899), 0);
-        lv_obj_align(lbl, LV_ALIGN_TOP_MID, 0, y);
-        y += 20;
+        lv_obj_add_style(lbl, ui_theme::style_text_muted(), LV_PART_MAIN);
     } else {
         for (uint8_t i = 0; i < count && i < wifi_profiles::MAX_NETWORKS; i++) {
             wifi_profiles::Network net;
@@ -185,54 +150,62 @@ static lv_obj_t* create_wifi_networks_screen() {
 
             bool is_current = connected_ssid.equalsIgnoreCase(net.ssid) &&
                               wifi_profiles::is_connected();
-            char row_buf[80];
-            snprintf(row_buf, sizeof(row_buf), "%s%u: %s (prio=%u)%s",
-                     is_current ? "* " : "  ", i, net.ssid, net.prio,
-                     is_current ? " [connected]" : "");
 
-            lv_obj_t* row_lbl = lv_label_create(scr);
-            lv_label_set_text(row_lbl, row_buf);
-            lv_obj_set_style_text_font(row_lbl, &lv_font_montserrat_14, 0);
-            lv_obj_set_style_text_color(row_lbl,
-                is_current ? lv_color_hex(0x4ADE80) : lv_color_hex(0xddddff), 0);
-            lv_obj_align(row_lbl, LV_ALIGN_TOP_LEFT, 15, y);
-            y += 20;
+            char label_buf[64];
+            snprintf(label_buf, sizeof(label_buf), "%u: %s", i, net.ssid);
+
+            const char* trailing = is_current ? "[connected]" : nullptr;
+
+            lv_obj_t* row = widgets::make_list_row(content, label_buf,
+                                                   nullptr, trailing,
+                                                   nullptr, nullptr);
+
+            if (is_current) {
+                /* Color label SUCCESS */
+                lv_obj_t* row_lbl = lv_obj_get_child(row, 0);
+                if (row_lbl) {
+                    lv_obj_set_style_text_color(row_lbl,
+                        lv_color_hex(tok::SUCCESS), LV_PART_MAIN);
+                }
+                /* Style "[connected]" trailing as text_key — must happen BEFORE
+                 * make_status_dot() appends the dot, otherwise child(-1) returns
+                 * the dot instead of the trailing label. */
+                lv_obj_t* trail_lbl = lv_obj_get_child(row, -1);
+                if (trail_lbl && trail_lbl != row_lbl) {
+                    lv_obj_add_style(trail_lbl, ui_theme::style_text_key(), LV_PART_MAIN);
+                }
+                /* Trailing status dot — appended last so child(-1) is the dot */
+                widgets::make_status_dot(row, tok::SUCCESS);
+            }
         }
     }
 
-    y += 14;
-    /* "Scan & Add Network" button — launches the on-screen WiFi setup flow */
-    lv_obj_t* scan_btn = lv_button_create(scr);
-    lv_obj_set_size(scan_btn, 240, 40);
-    lv_obj_set_style_bg_color(scan_btn, lv_color_hex(0x1a3a1a), 0);
-    lv_obj_set_style_bg_color(scan_btn, lv_color_hex(0x2a5a2a), LV_STATE_PRESSED);
-    lv_obj_set_style_radius(scan_btn, 8, 0);
-    lv_obj_set_style_border_width(scan_btn, 0, 0);
-    lv_obj_align(scan_btn, LV_ALIGN_TOP_MID, 0, y);
+    /* "Scan & Add Network" accent button */
+    lv_obj_t* scan_btn = lv_button_create(content);
+    lv_obj_set_width(scan_btn, LV_HOR_RES - 2 * tok::SCREEN_PAD);
+    lv_obj_set_height(scan_btn, tok::TAP_MIN);
+    lv_obj_set_style_radius(scan_btn, tok::R_M, LV_PART_MAIN);
+    lv_obj_set_style_border_width(scan_btn, 0, LV_PART_MAIN);
+    lv_obj_add_style(scan_btn, ui_theme::style_btn_accent(), LV_PART_MAIN);
+    lv_obj_add_style(scan_btn, ui_theme::style_btn_accent_pressed(), LV_PART_MAIN | LV_STATE_PRESSED);
     lv_obj_add_event_cb(scan_btn, [](lv_event_t* /*e*/) {
         screen_router::push(wifi_setup::create_screen());
     }, LV_EVENT_CLICKED, NULL);
 
     lv_obj_t* scan_lbl = lv_label_create(scan_btn);
-    lv_label_set_text(scan_lbl, LV_SYMBOL_WIFI "  Scan & Add Network");
-    lv_obj_set_style_text_font(scan_lbl, &lv_font_montserrat_14, 0);
-    lv_obj_set_style_text_color(scan_lbl, lv_color_hex(0xffffff), 0);
+    lv_label_set_text(scan_lbl, LV_SYMBOL_WIFI " Scan & Add Network");
     lv_obj_center(scan_lbl);
 
-    /* Serial hint retained below the button */
-    y += 50;
-    lv_obj_t* hint = lv_label_create(scr);
-    lv_label_set_text(hint,
-        "Serial: wifi add/list/prefer/remove/clear");
-    lv_obj_set_style_text_font(hint, &lv_font_montserrat_14, 0);
-    lv_obj_set_style_text_color(hint, lv_color_hex(0x666677), 0);
-    lv_obj_align(hint, LV_ALIGN_TOP_LEFT, 15, y);
+    /* Serial hint */
+    lv_obj_t* hint = lv_label_create(content);
+    lv_label_set_text(hint, "Serial: wifi add/list/prefer/remove/clear");
+    lv_obj_add_style(hint, ui_theme::style_text_muted(), LV_PART_MAIN);
 
     s_wifi_screen = scr;
     return scr;
 }
 
-/* ── Tile click callbacks ────────────────────────────────────────────── */
+/* ── Tile click callbacks ────────────────────────────────────────────────── */
 
 static void claude_tile_cb(lv_event_t* /*e*/) {
     screen_router::push(create_claude_profiles_screen());
@@ -242,67 +215,51 @@ static void wifi_tile_cb(lv_event_t* /*e*/) {
     screen_router::push(create_wifi_networks_screen());
 }
 
-/* ── Main settings screen ────────────────────────────────────────────── */
+static void settings_back_cb(lv_event_t* /*e*/) {
+    screen_router::pop();
+}
+
+/* ── Main settings screen ────────────────────────────────────────────────── */
 
 lv_obj_t* create_screen() {
-    lv_obj_t* scr = lv_obj_create(NULL);
-    lv_obj_set_size(scr, LV_HOR_RES, LV_VER_RES);
-    lv_obj_set_style_bg_color(scr, lv_color_hex(0x1a1a2e), 0);
-    lv_obj_set_style_border_width(scr, 0, 0);
-    lv_obj_set_style_pad_all(scr, 0, 0);
+    lv_obj_t* scr = widgets::make_screen();
 
-    lv_obj_t* title = lv_label_create(scr);
-    lv_label_set_text(title, "Settings");
-    lv_obj_set_style_text_font(title, &lv_font_montserrat_20, 0);
-    lv_obj_set_style_text_color(title, lv_color_hex(0xffffff), 0);
-    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 10);
+    widgets::make_topbar(scr, "Settings", settings_back_cb);
 
-    /* Info row */
-    lv_obj_t* info_lbl = lv_label_create(scr);
-    lv_label_set_text(info_lbl, "Touch: factory cal (Phase 0)");
-    lv_obj_set_style_text_color(info_lbl, lv_color_hex(0x888888), 0);
-    lv_obj_align(info_lbl, LV_ALIGN_TOP_MID, 0, 48);
+    /* Content container — flex COLUMN, starts just below topbar */
+    lv_obj_t* content = lv_obj_create(scr);
+    lv_obj_set_size(content, LV_HOR_RES, LV_SIZE_CONTENT);
+    lv_obj_set_pos(content, 0, tok::TOPBAR_H);
+    lv_obj_set_style_bg_opa(content, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(content, 0, 0);
+    lv_obj_set_style_pad_all(content, tok::SCREEN_PAD, 0);
+    lv_obj_set_style_pad_row(content, tok::SP_M, 0);
+    lv_obj_set_layout(content, LV_LAYOUT_FLEX);
+    lv_obj_set_flex_flow(content, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(content, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
 
-    /* Claude Profiles tile */
-    lv_obj_t* claude_tile = lv_button_create(scr);
-    lv_obj_set_size(claude_tile, 260, 48);
-    lv_obj_align(claude_tile, LV_ALIGN_TOP_MID, 0, 80);
-    lv_obj_set_style_bg_color(claude_tile, lv_color_hex(0x2a2a4e), 0);
-    lv_obj_set_style_radius(claude_tile, 8, 0);
-    lv_obj_add_event_cb(claude_tile, claude_tile_cb, LV_EVENT_CLICKED, NULL);
-
-    lv_obj_t* claude_lbl = lv_label_create(claude_tile);
+    /* 1. Claude Profiles row */
     uint8_t p_count = claude_auth::profile_count();
-    char claude_buf[48];
-    snprintf(claude_buf, sizeof(claude_buf), "Claude Profiles  (%u/%u)",
+    char claude_buf[32];
+    snprintf(claude_buf, sizeof(claude_buf), "(%u/%u)",
              p_count, (uint8_t)claude_auth::MAX_PROFILES);
-    lv_label_set_text(claude_lbl, claude_buf);
-    lv_obj_set_style_text_font(claude_lbl, &lv_font_montserrat_14, 0);
-    lv_obj_set_style_text_color(claude_lbl, lv_color_hex(0xffffff), 0);
-    lv_obj_center(claude_lbl);
+    widgets::make_list_row(content, "Claude Profiles", claude_buf,
+                           LV_SYMBOL_RIGHT, claude_tile_cb, nullptr);
 
-    /* WiFi Networks tile */
-    lv_obj_t* wifi_tile = lv_button_create(scr);
-    lv_obj_set_size(wifi_tile, 260, 48);
-    lv_obj_align(wifi_tile, LV_ALIGN_TOP_MID, 0, 140);
-    lv_obj_set_style_bg_color(wifi_tile, lv_color_hex(0x2a4e2a), 0);
-    lv_obj_set_style_radius(wifi_tile, 8, 0);
-    lv_obj_add_event_cb(wifi_tile, wifi_tile_cb, LV_EVENT_CLICKED, NULL);
-
-    lv_obj_t* wifi_lbl = lv_label_create(wifi_tile);
+    /* 2. WiFi Networks row */
     uint8_t n_count = wifi_profiles::network_count();
     char wifi_buf[48];
-    snprintf(wifi_buf, sizeof(wifi_buf), "WiFi Networks  (%u/%u)%s",
+    snprintf(wifi_buf, sizeof(wifi_buf), "(%u/%u)%s",
              n_count, (uint8_t)wifi_profiles::MAX_NETWORKS,
-             wifi_profiles::is_connected() ? "  *" : "");
-    lv_label_set_text(wifi_lbl, wifi_buf);
-    lv_obj_set_style_text_font(wifi_lbl, &lv_font_montserrat_14, 0);
-    lv_obj_set_style_text_color(wifi_lbl, lv_color_hex(0xffffff), 0);
-    lv_obj_center(wifi_lbl);
+             wifi_profiles::is_connected() ? "  \xE2\x97\x8F" : "");
+    widgets::make_list_row(content, "WiFi Networks", wifi_buf,
+                           LV_SYMBOL_RIGHT, wifi_tile_cb, nullptr);
 
-    /* Network connectivity status label */
-    lv_obj_t* net_status_lbl = lv_label_create(scr);
-    lv_obj_set_style_text_font(net_status_lbl, &lv_font_montserrat_14, 0);
+    /* 3. Divider */
+    widgets::make_divider(content);
+
+    /* 4. Network status */
+    lv_obj_t* net_status_lbl = lv_label_create(content);
 
 #if __has_include("os/net_manager.h")
     /* net_manager.h available — show rich mode + optional AP SSID */
@@ -333,8 +290,8 @@ lv_obj_t* create_screen() {
         lv_label_set_text(net_status_lbl, net_buf);
         lv_obj_set_style_text_color(net_status_lbl,
             (m == net_manager::Mode::StaConnected)
-                ? lv_color_hex(0x4ADE80)
-                : lv_color_hex(0x888899), 0);
+                ? lv_color_hex(tok::SUCCESS)
+                : lv_color_hex(tok::TEXT_MUTED), LV_PART_MAIN);
     }
 #else
     /* Fallback: simple connected / not-connected from wifi_profiles */
@@ -342,13 +299,15 @@ lv_obj_t* create_screen() {
         wifi_profiles::is_connected() ? "Net: Connected" : "Net: Not connected");
     lv_obj_set_style_text_color(net_status_lbl,
         wifi_profiles::is_connected()
-            ? lv_color_hex(0x4ADE80)
-            : lv_color_hex(0x888899), 0);
+            ? lv_color_hex(tok::SUCCESS)
+            : lv_color_hex(tok::TEXT_MUTED), LV_PART_MAIN);
 #endif
 
-    lv_obj_align(net_status_lbl, LV_ALIGN_TOP_MID, 0, 200);
+    /* 5. Info hint */
+    lv_obj_t* info_lbl = lv_label_create(content);
+    lv_label_set_text(info_lbl, "Touch: factory cal (Phase 0)");
+    lv_obj_add_style(info_lbl, ui_theme::style_text_muted(), LV_PART_MAIN);
 
-    widgets::make_back_btn(scr, back_cb);
     return scr;
 }
 
