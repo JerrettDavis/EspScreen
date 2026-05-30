@@ -2,8 +2,8 @@
 
 **Project**: EspScreen — pluggable smart-display firmware for ESP32 + ST7796 IPS
 **Target**: ESP32-WROOM-32E DevKit on COM20, LCDWiki 3.5" 320x480 IPS + XPT2046 + microSD
-**Status**: Phase 0 (bring-up) — design frozen, implementation pending
-**Owner**: mxjerrett@gmail.com
+**Status**: Phase 1 complete — v0.1.0 released
+**Owner**: JerrettDavis
 **Last revised**: 2026-05-28
 
 ---
@@ -115,7 +115,7 @@ See `firmware/00-hello-world/`. Acceptance: screen lit, "EspScreen v0.0.1" text 
   },
   "apps": {
     "autostart": "launcher",
-    "claude_widget": { "endpoint": "http://192.168.1.50:8080/claude/status", "poll_sec": 60, "timeout_sec": 5 }
+    "claude_widget": { "endpoint": "http://YOUR-PC-IP:8766/status.json", "poll_sec": 60, "timeout_sec": 5 }
   },
   "leds": { "default_effect": "off", "alert_effect": "pulse_red" },
   "security": { "allow_unsigned_apps": true, "ota_url": "" },

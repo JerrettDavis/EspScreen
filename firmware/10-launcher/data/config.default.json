@@ -42,7 +42,7 @@
   "apps": {
     "autostart": "launcher",
     "claude_widget": {
-      "endpoint": "http://192.168.1.50:8080/claude/status",
+      "endpoint": "http://YOUR-PC-IP:8766/status.json",
       "poll_sec": 60,
       "timeout_sec": 5
     }
