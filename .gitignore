@@ -29,3 +29,4 @@ secrets.json
 # Debug / test artifacts
 *.log
 firmware/**/*log_capture*.txt
+**/monitor_output.txt

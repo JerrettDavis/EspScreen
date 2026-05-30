@@ -4,20 +4,20 @@ Lights the ST7796 display, shows "EspScreen v0.0.1", and cycles backgrounds on t
 
 ## Build & Flash
 
-```powershell
-cd C:\git\EspScreen\firmware\00-hello-world
+Ensure PlatformIO core is on your PATH (`pio --version` should succeed).
+
+```sh
+cd firmware/00-hello-world
 
 # Compile only
-C:\Users\jd\.platformio\penv\Scripts\pio.exe run
+pio run
 
-# Flash to COM20
-C:\Users\jd\.platformio\penv\Scripts\pio.exe run -t upload
+# Flash (auto-detects COM port)
+pio run -t upload
 
 # Serial monitor (Ctrl+C to exit)
-C:\Users\jd\.platformio\penv\Scripts\pio.exe device monitor
+pio device monitor
 ```
-
-Or if `pio` is on your PATH: substitute `pio` for the full path above.
 
 ## Expected Behaviour
 
