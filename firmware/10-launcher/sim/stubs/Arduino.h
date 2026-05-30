@@ -33,6 +33,12 @@
 #ifndef LOW
 #define LOW 0
 #endif
+
+/* The pin-direction constants INPUT/OUTPUT collide with <windows.h>, which
+ * declares a struct named INPUT (pulled in by LVGL's Windows GDI backend when
+ * LV_USE_WINDOWS=1). No simulated screen uses these at construction, so skip
+ * them entirely in the GDI sim build to avoid mangling the Win32 headers. */
+#if !defined(LV_USE_WINDOWS) || (LV_USE_WINDOWS == 0)
 #ifndef INPUT
 #define INPUT 0
 #endif
@@ -41,6 +47,7 @@
 #endif
 #ifndef INPUT_PULLUP
 #define INPUT_PULLUP 2
+#endif
 #endif
 
 #ifndef DEC

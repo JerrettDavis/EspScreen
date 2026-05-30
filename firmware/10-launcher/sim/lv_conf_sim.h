@@ -37,5 +37,17 @@
 #undef  LV_LOG_PRINTF
 #define LV_LOG_PRINTF 1
 
+/* ── Interactive GDI simulator only (Phase 3) ────────────────────────────────
+ * LVGL's Windows backend (LV_USE_WINDOWS, set via -D only in [env:sim]) drives
+ * rendering on its own Win32 thread and therefore REQUIRES LV_USE_OS ==
+ * LV_OS_WINDOWS. This override is gated on LV_USE_WINDOWS, so the headless
+ * (test_native) and device (esp32dev) builds keep LV_OS_NONE untouched.
+ * LV_OS_WINDOWS is defined in lv_conf_internal.h, which the root lv_conf.h
+ * pulls in, so the symbol is available here. */
+#if defined(LV_USE_WINDOWS) && (LV_USE_WINDOWS == 1)
+#undef  LV_USE_OS
+#define LV_USE_OS  LV_OS_WINDOWS
+#endif
+
 /* DO NOT change LV_COLOR_DEPTH, fonts, or LV_DEF_REFR_PERIOD — pixel-exactness
  * with the device build depends on them staying identical. */
