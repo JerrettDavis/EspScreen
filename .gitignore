@@ -25,6 +25,10 @@ secrets.json
 *.local.json
 .env
 .env.*
+**/.credentials*
+devices.json
+**/*.bak
+**/token-refresh.log
 
 # Debug / test artifacts
 *.log

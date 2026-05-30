@@ -5,7 +5,8 @@
   "type": "module",
   "scripts": {
     "start": "node watch.js",
-    "once": "node watch.js --once"
+    "once": "node watch.js --once",
+    "refresh": "node refresh.js"
   },
   "dependencies": {
     "chokidar": "^3.6.0",
