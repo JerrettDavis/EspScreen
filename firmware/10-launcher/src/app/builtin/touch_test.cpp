@@ -31,9 +31,17 @@ static void back_cb(lv_event_t* e) {
     screen_router::pop();
 }
 
+static void screen_unloaded_cb(lv_event_t* e) {
+    /* Null statics BEFORE delete so any in-flight indev/press lambda no-ops. */
+    s_dot   = nullptr;
+    s_coord = nullptr;
+    screen_router::delete_on_unload(e);
+}
+
 lv_obj_t* create_screen() {
     lv_obj_t* scr = widgets::make_screen();
     widgets::make_topbar(scr, "Touch Test", back_cb);
+    lv_obj_add_event_cb(scr, screen_unloaded_cb, LV_EVENT_SCREEN_UNLOADED, NULL);
 
     /* Coord label */
     s_coord = lv_label_create(scr);

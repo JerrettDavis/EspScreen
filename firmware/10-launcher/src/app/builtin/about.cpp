@@ -15,6 +15,7 @@ static void back_cb(lv_event_t* e) {
 lv_obj_t* create_screen() {
     lv_obj_t* scr = widgets::make_screen();
     widgets::make_topbar(scr, "About", back_cb);
+    screen_router::attach_autodelete(scr);
 
     /* Card with key-value rows */
     lv_obj_t* card = widgets::make_card(scr, -1, -1);

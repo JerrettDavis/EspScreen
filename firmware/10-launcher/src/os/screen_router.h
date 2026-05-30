@@ -20,4 +20,15 @@ namespace screen_router {
 
     /** Navigate to root (launcher) without animation. */
     void go_home();
+
+    /**
+     * Attach to a screen via LV_EVENT_SCREEN_UNLOADED. Deletes the screen
+     * (async) once its fade-out animation has fully completed. Crash-safe:
+     * never deletes the currently-active screen. Use this on EVERY pushed
+     * screen so the router's pop()/go_home() reclaim heap.
+     */
+    void delete_on_unload(lv_event_t* e);
+
+    /** Convenience: register delete_on_unload on `scr`. Call in each create_screen(). */
+    void attach_autodelete(lv_obj_t* scr);
 }

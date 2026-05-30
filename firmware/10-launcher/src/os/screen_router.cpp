@@ -51,4 +51,20 @@ void go_home() {
     }
 }
 
+void delete_on_unload(lv_event_t* e) {
+    lv_obj_t* scr = (lv_obj_t*)lv_event_get_target(e);
+    if (!scr) return;
+    if (scr == lv_scr_act()) {
+        /* Still active — never delete the live screen mid-flight. */
+        Serial.printf("[router] delete_on_unload: scr=%p still active, skip\n", (void*)scr);
+        return;
+    }
+    Serial.printf("[router] delete_on_unload: async-deleting scr=%p\n", (void*)scr);
+    lv_obj_delete_async(scr);
+}
+
+void attach_autodelete(lv_obj_t* scr) {
+    if (scr) lv_obj_add_event_cb(scr, delete_on_unload, LV_EVENT_SCREEN_UNLOADED, nullptr);
+}
+
 } // namespace screen_router

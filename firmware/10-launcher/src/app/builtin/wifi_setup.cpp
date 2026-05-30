@@ -12,7 +12,7 @@
  *   keyboard creation.
  *
  * Lifecycle mirrors claude_widget.cpp:
- *   LV_EVENT_DELETE on the screen nulls all static widget pointers and
+ *   LV_EVENT_SCREEN_UNLOADED on the screen nulls all static widget pointers and
  *   deletes any pending one-shot timer.
  */
 
@@ -79,6 +79,11 @@ static void screen_delete_cb(lv_event_t* /*e*/) {
     s_status_lbl = nullptr;
     s_hint_lbl   = nullptr;
     LOG_I("wifi_setup", "screen_delete_cb: timers stopped, widget statics nulled");
+}
+
+static void screen_unloaded_cb(lv_event_t* e) {
+    screen_delete_cb(e);                 // stop timer, null all widget statics
+    screen_router::delete_on_unload(e);  // async-delete after fade completes
 }
 
 /* ── Step-wide back callback ─────────────────────────────────────────── */
@@ -295,7 +300,7 @@ static void show_step3_connect(lv_obj_t* scr, const char* pw) {
     if (!s_status_lbl) return;   /* screen was destroyed during connect */
 
     if (ok) {
-        lv_label_set_text(s_status_lbl, "Connected " LV_SYMBOL_OK);
+        lv_label_set_text(s_status_lbl, "Connected OK");
         lv_obj_set_style_text_color(s_status_lbl, lv_color_hex(tok::SUCCESS), 0);
         LOG_I("wifi_setup", "step3: connected — scheduling pop in %u ms",
               (unsigned)SUCCESS_POP_DELAY_MS);
@@ -304,12 +309,12 @@ static void show_step3_connect(lv_obj_t* scr, const char* pw) {
         s_pop_timer = lv_timer_create(pop_timer_cb, SUCCESS_POP_DELAY_MS, nullptr);
         lv_timer_set_repeat_count(s_pop_timer, 1);
     } else {
-        lv_label_set_text(s_status_lbl, "Failed " LV_SYMBOL_CLOSE);
+        lv_label_set_text(s_status_lbl, "Failed X");
         lv_obj_set_style_text_color(s_status_lbl, lv_color_hex(tok::ERROR_), 0);
 
         /* Sub-label: suggest trying again */
         lv_obj_t* hint = lv_label_create(scr);
-        lv_label_set_text(hint, "Tap " LV_SYMBOL_LEFT " to retry");
+        lv_label_set_text(hint, "Tap < to retry");
         lv_obj_add_style(hint, ui_theme::style_text_muted(), LV_PART_MAIN);
         lv_obj_align(hint, LV_ALIGN_CENTER, 0, 30);
         s_hint_lbl = hint;  // track for cleanup on re-entry
@@ -341,7 +346,7 @@ lv_obj_t* create_screen() {
     lv_obj_t* scr = widgets::make_screen();
 
     /* Register delete handler — mirrors claude_widget.cpp lifecycle */
-    lv_obj_add_event_cb(scr, screen_delete_cb, LV_EVENT_DELETE, NULL);
+    lv_obj_add_event_cb(scr, screen_unloaded_cb, LV_EVENT_SCREEN_UNLOADED, NULL);
 
     s_screen = scr;
 
