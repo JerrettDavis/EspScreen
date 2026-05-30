@@ -1,0 +1,142 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+
+jobs:
+  release:
+    name: Build and release firmware
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Cache PlatformIO and pip
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.platformio
+            ~/.cache/pip
+          key: pio-release-${{ runner.os }}-${{ hashFiles('firmware/10-launcher/platformio.ini') }}
+          restore-keys: |
+            pio-release-${{ runner.os }}-
+
+      - name: Install PlatformIO
+        run: pip install --upgrade platformio
+
+      - name: Build firmware (esp32dev)
+        run: pio run -d firmware/10-launcher -e esp32dev
+
+      - name: Build filesystem image (LittleFS)
+        run: pio run -d firmware/10-launcher -e esp32dev -t buildfs
+
+      - name: Verify build artifacts exist
+        run: |
+          BUILD=firmware/10-launcher/.pio/build/esp32dev
+          echo "=== Checking required artifacts ==="
+          test -f "${BUILD}/bootloader.bin"   || { echo "ERROR: bootloader.bin missing"; exit 1; }
+          test -f "${BUILD}/partitions.bin"   || { echo "ERROR: partitions.bin missing"; exit 1; }
+          test -f "${BUILD}/firmware.bin"     || { echo "ERROR: firmware.bin missing"; exit 1; }
+
+          # Filesystem image: PlatformIO names it littlefs.bin for littlefs, spiffs.bin for spiffs
+          if [ -f "${BUILD}/littlefs.bin" ]; then
+            echo "FS_IMAGE=${BUILD}/littlefs.bin" >> "$GITHUB_ENV"
+            echo "Found littlefs.bin"
+          elif [ -f "${BUILD}/spiffs.bin" ]; then
+            echo "FS_IMAGE=${BUILD}/spiffs.bin" >> "$GITHUB_ENV"
+            echo "Found spiffs.bin"
+          else
+            echo "ERROR: Neither littlefs.bin nor spiffs.bin found in ${BUILD}"
+            ls -la "${BUILD}/"
+            exit 1
+          fi
+
+          # boot_app0.bin ships with the Arduino-ESP32 framework (in ~/.platformio)
+          BOOT_APP0=$(find ~/.platformio -name "boot_app0.bin" 2>/dev/null | head -1)
+          if [ -n "${BOOT_APP0}" ]; then
+            echo "BOOT_APP0=${BOOT_APP0}" >> "$GITHUB_ENV"
+            echo "Found boot_app0.bin at ${BOOT_APP0}"
+          else
+            echo "BOOT_APP0=" >> "$GITHUB_ENV"
+            echo "boot_app0.bin not found — will omit from merged image"
+          fi
+
+      - name: Merge into single flashable image
+        run: |
+          BUILD=firmware/10-launcher/.pio/build/esp32dev
+          OUTPUT="EspScreen-${{ github.ref_name }}-full.bin"
+
+          # Partition offsets (from firmware/10-launcher/partitions.csv):
+          #   bootloader  -> 0x1000   (ESP32 standard)
+          #   partitions  -> 0x8000   (ESP32 standard)
+          #   otadata     -> 0xe000   (from partitions.csv)
+          #   app0        -> 0x10000  (from partitions.csv)
+          #   spiffs/lfs  -> 0x310000 (from partitions.csv)
+
+          # Build the merge command as an array for correct quoting
+          MERGE_CMD=(
+            --chip esp32 merge_bin
+            -o "${OUTPUT}"
+            --flash_mode dio
+            --flash_size 4MB
+            0x1000   "${BUILD}/bootloader.bin"
+            0x8000   "${BUILD}/partitions.bin"
+          )
+
+          if [ -n "${BOOT_APP0}" ]; then
+            MERGE_CMD+=(0xe000 "${BOOT_APP0}")
+          fi
+
+          MERGE_CMD+=(
+            0x10000  "${BUILD}/firmware.bin"
+            0x310000 "${FS_IMAGE}"
+          )
+
+          echo "Running esptool.py merge_bin with ${#MERGE_CMD[@]} arguments"
+          pio pkg exec -d firmware/10-launcher -e esp32dev -- esptool.py "${MERGE_CMD[@]}"
+
+          echo "MERGED_BIN=${OUTPUT}" >> "$GITHUB_ENV"
+          ls -lh "${OUTPUT}"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          body: |
+            ## EspScreen ${{ github.ref_name }}
+
+            ### Flashing
+
+            **Full image (recommended) — flash everything in one command:**
+            ```bash
+            esptool.py --chip esp32 --port /dev/ttyUSB0 --baud 460800 \
+              write_flash 0x0 EspScreen-${{ github.ref_name }}-full.bin
+            ```
+
+            **Or use PlatformIO (requires the source tree):**
+            ```bash
+            pio run -d firmware/10-launcher -e esp32dev -t upload
+            ```
+
+            **Individual parts** (for partial re-flash):
+            | File | Offset | Description |
+            |------|--------|-------------|
+            | `firmware.bin` | `0x10000` | Application |
+            | `*-full.bin` | `0x0000` | Merged: bootloader + partitions + app + filesystem |
+
+            > Board: ESP32 DevKit, 4 MB flash, LittleFS filesystem partition at `0x310000`.
+          files: |
+            firmware/10-launcher/.pio/build/esp32dev/firmware.bin
+            ${{ env.MERGED_BIN }}
+            ${{ env.FS_IMAGE }}

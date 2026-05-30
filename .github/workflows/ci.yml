@@ -1,0 +1,127 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - master
+      - main
+  pull_request:
+
+jobs:
+  firmware:
+    name: "Firmware build (${{ matrix.project }})"
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        project:
+          - firmware/00-hello-world
+          - firmware/10-launcher
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Cache PlatformIO and pip
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.platformio
+            ~/.cache/pip
+          key: pio-${{ runner.os }}-${{ hashFiles(format('{0}/platformio.ini', matrix.project)) }}
+          restore-keys: |
+            pio-${{ runner.os }}-
+
+      - name: Install PlatformIO
+        run: pip install --upgrade platformio
+
+      - name: Build firmware
+        run: pio run -d ${{ matrix.project }} -e esp32dev
+
+      - name: Upload launcher firmware artifact
+        if: matrix.project == 'firmware/10-launcher'
+        uses: actions/upload-artifact@v4
+        with:
+          name: launcher-firmware-esp32dev
+          path: firmware/10-launcher/.pio/build/esp32dev/firmware.bin
+          if-no-files-found: error
+
+  native-tests:
+    name: "Native unit tests (firmware/10-launcher)"
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Cache PlatformIO and pip
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.platformio
+            ~/.cache/pip
+          key: pio-native-${{ runner.os }}-${{ hashFiles('firmware/10-launcher/platformio.ini') }}
+          restore-keys: |
+            pio-native-${{ runner.os }}-
+
+      - name: Install PlatformIO
+        run: pip install platformio
+
+      - name: Run native tests
+        run: pio test -d firmware/10-launcher -e native
+
+  node-tests:
+    name: "Node tool tests"
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Test tools/provision
+        working-directory: tools/provision
+        run: |
+          npm ci || npm install
+          set -- test_pure.mjs test*.mjs
+          if [ -f "$1" ] || compgen -G "test*.mjs" > /dev/null 2>&1; then
+            node --test test_pure.mjs test*.mjs
+          else
+            echo "No test files found in tools/provision — skipping"
+          fi
+
+      - name: Test tools/creds-watcher
+        working-directory: tools/creds-watcher
+        run: |
+          npm ci || npm install
+          set -- test_pure.mjs test*.mjs
+          if [ -f "$1" ] || compgen -G "test*.mjs" > /dev/null 2>&1; then
+            node --test test_pure.mjs test*.mjs
+          else
+            echo "No test files found in tools/creds-watcher — skipping"
+          fi
+
+      - name: Test tools/claude-endpoint
+        working-directory: tools/claude-endpoint
+        run: |
+          npm ci || npm install
+          set -- test_pure.mjs test*.mjs
+          if [ -f "$1" ] || compgen -G "test*.mjs" > /dev/null 2>&1; then
+            node --test test_pure.mjs test*.mjs
+          else
+            echo "No test files found in tools/claude-endpoint — skipping"
+          fi
