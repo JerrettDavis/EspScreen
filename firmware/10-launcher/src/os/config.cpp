@@ -23,6 +23,7 @@
  * Order must match the struct member declaration order in config.h.
  */
 static const config::DisplayCfg kDefaultDisplay = { 0, 80, 20, 60 };
+static const config::MirrorCfg  kDefaultMirror  = { false, 300, 80, 120 };
 
 /* NetworkCfg has char arrays — zero-init then set via helper below */
 static config::NetworkCfg kDefaultNetwork;
@@ -46,6 +47,7 @@ static config::DisplayCfg s_display = { 0, 80, 20, 60 };
 static config::NetworkCfg s_network;
 static config::DeviceCfg  s_device;
 static config::AppsCfg    s_apps;
+static config::MirrorCfg  s_mirror  = { false, 300, 80, 120 };
 
 namespace config {
 
@@ -56,6 +58,7 @@ bool mount_fs() {
     s_network = kDefaultNetwork;
     s_device  = kDefaultDevice;
     s_apps    = kDefaultApps;
+    s_mirror  = kDefaultMirror;
 
     if (!LittleFS.begin(true)) {
         LOG_E("config", "LittleFS.begin failed");
@@ -87,6 +90,16 @@ static bool copy_default() {
     return true;
 }
 
+/* Clamp a MirrorCfg to valid ranges in-place */
+static void clamp_mirror(config::MirrorCfg& m) {
+    if (m.interval_ms < 100)  m.interval_ms = 100;
+    if (m.interval_ms > 2000) m.interval_ms = 2000;
+    if (m.out_width   < 16)   m.out_width   = 16;
+    if (m.out_width   > 80)   m.out_width   = 80;
+    if (m.out_height  < 24)   m.out_height  = 24;
+    if (m.out_height  > 120)  m.out_height  = 120;
+}
+
 /* Apply parsed JsonDocument to live structs, filling missing keys with defaults */
 static void apply_doc(JsonDocument& doc) {
     init_defaults();   // idempotent (guarded); ensures kDefault* are populated
@@ -113,6 +126,13 @@ static void apply_doc(JsonDocument& doc) {
     /* apps */
     const char* autostart = doc["apps"]["autostart"] | kDefaultApps.autostart;
     strncpy(s_apps.autostart, autostart, sizeof(s_apps.autostart) - 1);
+
+    /* mirror */
+    s_mirror.enabled     = doc["mirror"]["enabled"]     | kDefaultMirror.enabled;
+    s_mirror.interval_ms = doc["mirror"]["interval_ms"] | kDefaultMirror.interval_ms;
+    s_mirror.out_width   = doc["mirror"]["out_width"]   | kDefaultMirror.out_width;
+    s_mirror.out_height  = doc["mirror"]["out_height"]  | kDefaultMirror.out_height;
+    clamp_mirror(s_mirror);
 }
 
 void load_config() {
@@ -150,6 +170,13 @@ const DisplayCfg& display() { return s_display; }
 const NetworkCfg& network() { return s_network; }
 const DeviceCfg&  device()  { return s_device;  }
 const AppsCfg&    apps()    { return s_apps;     }
+const MirrorCfg&  mirror()  { return s_mirror;   }
+
+bool set_mirror(const MirrorCfg& m) {
+    s_mirror = m;
+    clamp_mirror(s_mirror);
+    return save_config();
+}
 
 /* ── save_config ─────────────────────────────────────────────────
  * Key-preservation approach:
@@ -192,6 +219,11 @@ bool save_config() {
     doc["network"]["wifi"]["hostname"] = s_network.hostname;
 
     doc["apps"]["autostart"] = s_apps.autostart;
+
+    doc["mirror"]["enabled"]     = s_mirror.enabled;
+    doc["mirror"]["interval_ms"] = s_mirror.interval_ms;
+    doc["mirror"]["out_width"]   = s_mirror.out_width;
+    doc["mirror"]["out_height"]  = s_mirror.out_height;
 
     /* Write to LittleFS atomically via tmp → rename */
     File lf = LittleFS.open("/config.json.tmp", "w");

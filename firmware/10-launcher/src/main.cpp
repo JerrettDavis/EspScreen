@@ -25,6 +25,9 @@
  *   claude poll
  *   claude get
  *   claude set <url>  (deprecated no-op)
+ *   mirror on
+ *   mirror off
+ *   mirror status
  */
 
 #include <Arduino.h>
@@ -41,6 +44,7 @@
 #include "os/api_server.h"
 #include "os/net_manager.h"
 #include "os/web_portal.h"
+#include "os/screen_mirror.h"
 #include "os/sd_store.h"
 #include "ui/theme.h"
 #include "app/builtin/launcher.h"
@@ -71,6 +75,8 @@ void setup() {
         Serial.println("[main E] LittleFS mount failed — using defaults");
     } else {
         config::load_config();
+        screen_mirror::init();   // heap-alloc shadow buffer before first enable()
+        screen_mirror::enable(config::mirror().enabled);
         LOG_I("main", "device.name=%s", config::device().name);
         LOG_I("main", "free heap pre-display=%lu", (unsigned long)esp_get_free_heap_size());
     }
@@ -116,6 +122,7 @@ void setup() {
     Serial.println("[main]   wifi: add | remove | list | prefer | clear | status");
     Serial.println("[main]   claude: profile add/remove/list/use | token set | refresh | poll | get");
     Serial.println("[main]   api: set-secret <secret> | status");
+    Serial.println("[main]   mirror: on | off | status");
 }
 
 /* ── Quote-aware argument splitter ──────────────────────────────────
@@ -475,9 +482,39 @@ static void dispatch_serial_cmd(const String& cmd) {
             Serial.println("[net] Subcommands: status | portal");
         }
 
+    /* ── Mirror commands ────────────────────────────────────────────── */
+    } else if (verb == "mirror") {
+        String sub = (argc >= 2) ? argv[1] : String("status");
+        sub.toLowerCase();
+
+        if (sub == "on") {
+            config::MirrorCfg m = config::mirror();
+            m.enabled = true;
+            config::set_mirror(m);
+            screen_mirror::enable(true);
+            Serial.printf("[mirror] ON (interval=%d out=%dx%d)\n",
+                          m.interval_ms, m.out_width, m.out_height);
+
+        } else if (sub == "off") {
+            config::MirrorCfg m = config::mirror();
+            m.enabled = false;
+            config::set_mirror(m);
+            screen_mirror::enable(false);
+            Serial.println("[mirror] OFF");
+
+        } else if (sub == "status") {
+            const config::MirrorCfg& m = config::mirror();
+            Serial.printf("[mirror] %s  interval=%d  out=%dx%d  cap=80x120\n",
+                          screen_mirror::enabled() ? "ON" : "OFF",
+                          m.interval_ms, m.out_width, m.out_height);
+
+        } else {
+            Serial.println("[mirror] usage: mirror <on|off|status>");
+        }
+
     } else {
         Serial.printf("[main] Unknown command: '%s'\n", cmd.c_str());
-        Serial.println("[main] Commands: cal | tdbg | info | reset | wifi | claude | api | net");
+        Serial.println("[main] Commands: cal | tdbg | info | reset | wifi | claude | api | net | mirror");
     }
 }
 

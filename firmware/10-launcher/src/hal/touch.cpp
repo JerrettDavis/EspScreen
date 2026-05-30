@@ -29,8 +29,24 @@ static const uint16_t kCalData[5] = { 275, 3620, 264, 3532, 4 };
 static bool    s_debug_touch  = false;
 static uint32_t s_last_dbg_ms = 0;
 
+/* ── Inject state (one-shot synthetic tap) ───────────────────────── */
+static bool    s_inject_pending = false;
+static int16_t s_inject_x       = 0;
+static int16_t s_inject_y       = 0;
+
 /* ── LVGL indev read callback ────────────────────────────────────── */
 static void touch_read_cb(lv_indev_t* indev, lv_indev_data_t* data) {
+    /* ── Injected tap takes priority ──────────────────────────────── */
+    if (s_inject_pending) {
+        s_inject_pending  = false;
+        data->state       = LV_INDEV_STATE_PRESSED;
+        data->point.x     = s_inject_x;
+        data->point.y     = s_inject_y;
+        return;
+        /* Next cycle falls through to the hardware path → RELEASED,
+         * giving LVGL a clean tap event. */
+    }
+
     TFT_eSPI* tft = display::get_tft();
     uint16_t x, y;
     if (tft->getTouch(&x, &y)) {
@@ -55,6 +71,16 @@ void set_debug(bool enabled) {
 
 bool get_debug() {
     return s_debug_touch;
+}
+
+void inject(int16_t x, int16_t y) {
+    if (s_inject_pending) {
+        LOG_W("touch", "inject(%d,%d) dropped — previous inject still pending", x, y);
+        return;
+    }
+    s_inject_x       = x;
+    s_inject_y       = y;
+    s_inject_pending = true;
 }
 
 void init() {
