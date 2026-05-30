@@ -75,8 +75,6 @@ void setup() {
         Serial.println("[main E] LittleFS mount failed — using defaults");
     } else {
         config::load_config();
-        screen_mirror::init();   // heap-alloc shadow buffer before first enable()
-        screen_mirror::enable(config::mirror().enabled);
         LOG_I("main", "device.name=%s", config::device().name);
         LOG_I("main", "free heap pre-display=%lu", (unsigned long)esp_get_free_heap_size());
     }
@@ -86,6 +84,13 @@ void setup() {
     display::init();
     ui_theme::apply();
 #endif
+
+    /* ── Screen mirror init (after display/active-screen is ready) ──
+     * screen_mirror::init() allocates the shadow buffer.
+     * screen_mirror::enable() calls LVGL functions that require the
+     * active screen to be valid. Must run AFTER display::init(). */
+    screen_mirror::init();   // heap-alloc shadow buffer before first enable()
+    screen_mirror::enable(config::mirror().enabled);
 
 #if STAGE_1B_TOUCH
     touch::init();

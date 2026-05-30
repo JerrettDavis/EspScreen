@@ -84,6 +84,9 @@ String get_active_label();
 /** Check whether the active token appears to be expired. */
 bool is_token_expired();
 
+/** True once SNTP has produced a plausible wall clock (post-2001). */
+bool wall_clock_ready();
+
 /**
  * Refresh the active profile's tokens against Anthropic's OAuth endpoint.
  * Requires WiFi to be connected.  Blocks until the HTTP round-trip completes

@@ -50,23 +50,30 @@ static const char* ANTHROPIC_BETA_HDR  = "oauth-2025-04-20";
 
 /* ── Poll result struct — filled by poll_task, read by apply_cb ───────── */
 struct PollResult {
-    bool  ok;           // true = HTTP 200 + valid JSON
-    int   http_code;    // raw HTTP status (or -1 for network error)
-    int   pct5h;
-    int   pct7d;
-    char  reset5h[24];  // formatted duration string, e.g. "2h 15m"
-    char  reset7d[24];
-    char  err[64];      // error message when ok==false
-    bool  token_expired;
+    bool     ok;           // true = HTTP 200 + valid JSON
+    int      http_code;    // raw HTTP status (or -1 for network error)
+    int      pct5h;
+    int      pct7d;
+    char     reset5h[24];  // formatted duration string, e.g. "2h 15m"
+    char     reset7d[24];
+    char     err[64];      // error message when ok==false
+    bool     token_expired;
+    uint32_t session;      // screen-session id captured at trigger_poll time
 };
 
 /* ── Background task / queue state ───────────────────────────────────── */
 /* s_result_q: single-slot queue, persistent across screen open/close.
  * Created lazily on first trigger_poll() and never deleted.
  * Avoids use-after-free if poll_task is still writing when screen closes. */
-static QueueHandle_t s_result_q    = nullptr;
+static QueueHandle_t s_result_q      = nullptr;
 static volatile bool s_poll_inflight = false;  // true while poll_task is running
-static TaskHandle_t  s_poll_task   = nullptr;
+static TaskHandle_t  s_poll_task     = nullptr;
+
+/* Monotonic screen-session id. Incremented every create_screen(). A PollResult
+ * is tagged with the session that requested it; apply_cb discards results whose
+ * session != the current one (belong to a prior, now-destroyed screen). */
+static volatile uint32_t s_session      = 0;
+static volatile uint32_t s_poll_session = 0;  // session captured at trigger_poll time
 
 /* ── Timer / screen state ─────────────────────────────────────────────── */
 static lv_timer_t* s_poll_timer      = nullptr;
@@ -126,7 +133,7 @@ static void update_title() {
     String label = claude_auth::get_active_label();
     String title = "Claude";
     if (label != "(none)") {
-        title = "Claude \xe2\x80\x94 " + label;  // UTF-8 em dash
+        title = "Claude - " + label;  // ASCII hyphen (em dash 0x2014 is not in the font -> tofu)
     }
     lv_label_set_text(s_lbl_title, title.c_str());
 }
@@ -313,12 +320,19 @@ static void do_network_poll(PollResult& result) {
                 http2.end();
                 client2.stop();
                 result.token_expired = true;
-                snprintf(result.err, sizeof(result.err), "Auth failed — reprovision tokens");
+                snprintf(result.err, sizeof(result.err),
+                         "Refreshed but still 401 — reprovision tokens");
                 LOG_W("claude_w", "poll_task: retry after refresh failed: %d", code);
             }
         } else {
             result.token_expired = true;
-            snprintf(result.err, sizeof(result.err), "Token expired — use 'claude token set'");
+            if (!claude_auth::wall_clock_ready()) {
+                snprintf(result.err, sizeof(result.err),
+                         "Clock not synced — token refresh failed. Reprovision via 'claude token set'");
+            } else {
+                snprintf(result.err, sizeof(result.err),
+                         "Token expired & refresh failed — run 'claude token set'");
+            }
             LOG_W("claude_w", "poll_task: refresh failed");
         }
         return;
@@ -359,10 +373,13 @@ static void do_network_poll(PollResult& result) {
     }
 }
 
-/* ── FreeRTOS poll task — core 0, 20KB stack ─────────────────────────── */
+/* ── FreeRTOS poll task — core 0, 8KB stack ──────────────────────────── */
 /*
- * Stack is 20480 bytes (bumped from 16384) to ensure TLS handshake fits
- * comfortably (TLS requires ~14-16KB stack headroom on ESP32).
+ * Stack is 8192 bytes — the minimum for ESP-IDF TLS call frames on the stack.
+ * mbedTLS data structures (SSL context, BIGNUM/PK buffers, cert store) are
+ * heap-allocated by the library itself, so reducing task-stack size directly
+ * reclaims heap available for those allocations. 24KB stack was too aggressive
+ * on a no-PSRAM board at ~47KB free heap, causing BIGNUM malloc failures.
  *
  * RULES:
  *   - NEVER call any lv_* function from this task.
@@ -372,6 +389,7 @@ static void do_network_poll(PollResult& result) {
 static void poll_task(void* /*arg*/) {
     PollResult result;
     do_network_poll(result);
+    result.session = s_poll_session;     // tag with requesting session
 
     /* Deliver to LVGL thread — xQueueOverwrite never blocks */
     if (s_result_q) {
@@ -401,11 +419,12 @@ static void trigger_poll() {
         }
     }
 
+    s_poll_session = s_session;   // tag this poll with the requesting session
     s_poll_inflight = true;
     BaseType_t ok = xTaskCreatePinnedToCore(
         poll_task,      /* task function */
         "clpoll",       /* name */
-        20480,          /* stack bytes — 20KB for TLS headroom */
+        8192,           /* stack bytes — 8KB; mbedTLS buffers live in heap, not stack */
         nullptr,        /* arg */
         1,              /* priority */
         &s_poll_task,   /* handle */
@@ -430,6 +449,11 @@ static void apply_cb(lv_timer_t* /*t*/) {
     if (!s_result_q) return;
     PollResult res;
     if (xQueueReceive(s_result_q, &res, 0) == pdTRUE) {
+        if (res.session != s_session) {
+            LOG_I("claude_w", "apply_cb: dropping stale result (session %lu != %lu)",
+                  (unsigned long)res.session, (unsigned long)s_session);
+            return;
+        }
         if (s_screen && lv_scr_act() == s_screen) {
             apply_result(res);
         }
@@ -469,6 +493,11 @@ static void screen_delete_cb(lv_event_t* /*e*/) {
     LOG_I("claude_w", "screen_delete_cb: timers stopped, widget statics nulled");
 }
 
+static void screen_unloaded_cb(lv_event_t* e) {
+    screen_delete_cb(e);                 // stop timers, null widget statics, null s_screen
+    screen_router::delete_on_unload(e);  // async-delete after fade
+}
+
 /* ── Timer callbacks ──────────────────────────────────────────────────── */
 
 static void poll_cb(lv_timer_t* /*t*/) {
@@ -476,9 +505,19 @@ static void poll_cb(lv_timer_t* /*t*/) {
 }
 
 static void immediate_poll_cb(lv_timer_t* t) {
+    if (!s_screen || lv_scr_act() != s_screen) {
+        lv_timer_delete(t);
+        s_immediate_timer = nullptr;
+        return;
+    }
+    if (s_poll_inflight) {
+        /* A prior poll (old session) is still running. Wait & retry so the
+         * re-opened screen still gets a fresh poll once it clears. */
+        return;   // leave timer running; repeats until inflight clears
+    }
     lv_timer_delete(t);
     s_immediate_timer = nullptr;
-    if (s_screen && lv_scr_act() == s_screen) trigger_poll();
+    trigger_poll();
 }
 
 static void back_cb(lv_event_t* /*e*/) { screen_router::pop(); }
@@ -487,6 +526,8 @@ static void refresh_btn_cb(lv_event_t* /*e*/) { trigger_poll(); }
 /* ── Screen builder ───────────────────────────────────────────────────── */
 
 lv_obj_t* create_screen() {
+    s_session++;   // new screen instance — invalidates any in-flight prior poll's result
+
     if (s_poll_timer)      { lv_timer_delete(s_poll_timer);      s_poll_timer      = nullptr; }
     if (s_immediate_timer) { lv_timer_delete(s_immediate_timer); s_immediate_timer = nullptr; }
     if (s_apply_timer)     { lv_timer_delete(s_apply_timer);     s_apply_timer     = nullptr; }
@@ -502,9 +543,9 @@ lv_obj_t* create_screen() {
     lv_obj_t* scr = widgets::make_screen();
     s_screen = scr;
 
-    /* Register delete callback so timers and widget statics are nulled if
-     * LVGL frees this screen (e.g. lv_obj_del called from outside this widget). */
-    lv_obj_add_event_cb(scr, screen_delete_cb, LV_EVENT_DELETE, nullptr);
+    /* Register unload callback: stops timers/nulls statics, then async-deletes
+     * the screen after its fade-out animation completes (via screen_router). */
+    lv_obj_add_event_cb(scr, screen_unloaded_cb, LV_EVENT_SCREEN_UNLOADED, nullptr);
 
     /* ── Top bar ─────────────────────────────────────────────────────────── */
     lv_obj_t* topbar = widgets::make_topbar(scr, "Claude Usage", back_cb, &s_lbl_title);
@@ -521,43 +562,51 @@ lv_obj_t* create_screen() {
     lv_obj_align(s_badge_stale, LV_ALIGN_RIGHT_MID, -(tok::SP_M + 20), 0);
     lv_obj_add_flag(s_badge_stale, LV_OBJ_FLAG_HIDDEN);
 
-    /* ── Content area — sits between topbar and botbar ───────────────────── */
-    /* y offset: below topbar + SP_S gap */
-    lv_coord_t y = tok::TOPBAR_H + tok::SP_S;
+    /* ── Content container — vertical flex between topbar and botbar ───────────
+     * BUG FIX: previously each section was added directly to `scr` and the two
+     * make_bar_row() containers were never positioned, so all sections collapsed
+     * to (0,0) and overlapped at the top. We now use a single flex-COLUMN content
+     * container; each section is a flex child and stacks vertically with a row gap.
+     * make_bar_row(content, ...) creates its column INSIDE this container, so the
+     * flex layout positions the whole bar-row block (no manual lv_obj_align needed). */
+    lv_obj_t* content = lv_obj_create(scr);
+    lv_obj_set_size(content, LV_HOR_RES, LV_VER_RES - tok::TOPBAR_H - tok::BOTBAR_H);
+    lv_obj_set_pos(content, 0, tok::TOPBAR_H);
+    lv_obj_set_style_bg_opa(content, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(content, 0, 0);
+    lv_obj_set_style_pad_all(content, tok::SCREEN_PAD, 0);
+    lv_obj_set_style_pad_row(content, tok::SP_M, 0);
+    lv_obj_set_scrollbar_mode(content, LV_SCROLLBAR_MODE_OFF);
+    lv_obj_set_layout(content, LV_LAYOUT_FLEX);
+    lv_obj_set_flex_flow(content, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(content, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
 
-    /* Token expired badge — centered, hidden by default */
-    s_badge_expired = lv_label_create(scr);
+    /* Token expired badge — hidden by default (flex child) */
+    s_badge_expired = lv_label_create(content);
     lv_label_set_text(s_badge_expired, "Token expired — use 'claude token set'");
     lv_obj_set_style_text_font(s_badge_expired, &lv_font_montserrat_14, 0);
     lv_obj_set_style_text_color(s_badge_expired, lv_color_hex(tok::ERROR_), 0);
-    lv_obj_align(s_badge_expired, LV_ALIGN_TOP_MID, 0, y);
+    lv_obj_set_width(s_badge_expired, LV_PCT(100));
+    lv_label_set_long_mode(s_badge_expired, LV_LABEL_LONG_WRAP);
     lv_obj_add_flag(s_badge_expired, LV_OBJ_FLAG_HIDDEN);
-    y += 18;
 
-    /* Status/error line */
-    s_lbl_status = lv_label_create(scr);
+    /* Status/error line (flex child) */
+    s_lbl_status = lv_label_create(content);
     lv_label_set_text(s_lbl_status, "");
     lv_obj_set_style_text_font(s_lbl_status, &lv_font_montserrat_14, 0);
     lv_obj_set_style_text_color(s_lbl_status, lv_color_hex(tok::ERROR_), 0);
-    lv_obj_align(s_lbl_status, LV_ALIGN_TOP_MID, 0, y);
-    y += tok::SP_L;
+    lv_obj_set_width(s_lbl_status, LV_PCT(100));
+    lv_label_set_long_mode(s_lbl_status, LV_LABEL_LONG_WRAP);
 
-    /* ── HERO: 5-hour bar row ─────────────────────────────────────────────── */
-    widgets::BarRow row5 = widgets::make_bar_row(scr, "5-hour limit");
-    lv_obj_align(row5.bar, LV_ALIGN_TOP_MID, 0, y + 20);
-    s_row_5h = row5;
-    y += 56 + tok::SP_L;
+    /* ── HERO: 5-hour bar row (flex child block) ──────────────────────────── */
+    s_row_5h = widgets::make_bar_row(content, "5-hour limit");
 
-    /* ── HERO: 7-day bar row ──────────────────────────────────────────────── */
-    widgets::BarRow row7 = widgets::make_bar_row(scr, "7-day limit");
-    lv_obj_align(row7.bar, LV_ALIGN_TOP_MID, 0, y + 20);
-    s_row_7d = row7;
-    y += 56 + tok::SP_L;
+    /* ── HERO: 7-day bar row (flex child block) ───────────────────────────── */
+    s_row_7d = widgets::make_bar_row(content, "7-day limit");
 
-    /* ── Model name kv row ────────────────────────────────────────────────── */
-    widgets::make_divider(scr);
-    y += tok::SP_S;
-    s_lbl_model = widgets::make_kv_row(scr, "Model");
+    /* ── Divider + Model name kv row (flex children) ──────────────────────── */
+    widgets::make_divider(content);
+    s_lbl_model = widgets::make_kv_row(content, "Model");
 
     /* ── Bottom bar ──────────────────────────────────────────────────────── */
     lv_obj_t* botbar = widgets::make_botbar(scr);
@@ -568,14 +617,14 @@ lv_obj_t* create_screen() {
     lv_obj_add_style(s_lbl_updated, ui_theme::style_text_muted(), 0);
     lv_obj_align(s_lbl_updated, LV_ALIGN_LEFT_MID, tok::SP_S, 0);
 
-    /* Refresh button — right side (ghost style, ~40×32) */
+    /* Refresh button — right side (ghost style; widened for ASCII "Refresh" text) */
     lv_obj_t* refresh_btn = lv_button_create(botbar);
-    lv_obj_set_size(refresh_btn, 40, 32);
+    lv_obj_set_size(refresh_btn, 88, 32);
     lv_obj_align(refresh_btn, LV_ALIGN_RIGHT_MID, -tok::SP_S, 0);
     lv_obj_add_style(refresh_btn, ui_theme::style_btn_ghost(), 0);
     lv_obj_add_event_cb(refresh_btn, refresh_btn_cb, LV_EVENT_CLICKED, NULL);
     lv_obj_t* refresh_lbl = lv_label_create(refresh_btn);
-    lv_label_set_text(refresh_lbl, LV_SYMBOL_REFRESH);
+    lv_label_set_text(refresh_lbl, "Refresh");   // ASCII (glyph-safe; FA glyphs tofu on this panel)
     lv_obj_center(refresh_lbl);
 
     /* Timers:
@@ -585,7 +634,8 @@ lv_obj_t* create_screen() {
      */
     s_poll_timer      = lv_timer_create(poll_cb, 60000, NULL);
     s_immediate_timer = lv_timer_create(immediate_poll_cb, 100, NULL);
-    lv_timer_set_repeat_count(s_immediate_timer, 1);
+    /* s_immediate_timer is repeating — immediate_poll_cb self-deletes once it
+     * successfully fires a poll (or when the screen is no longer active). */
     s_apply_timer     = lv_timer_create(apply_cb, 250, NULL);
 
     /* Set title to active profile */

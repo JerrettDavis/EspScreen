@@ -251,6 +251,11 @@ bool is_token_expired() {
     return expired;
 }
 
+/** True once SNTP has produced a plausible wall clock (post-2001). */
+bool wall_clock_ready() {
+    return (int64_t)time(nullptr) > 1000000000LL;
+}
+
 bool refresh_active() {
     uint8_t count = profile_count();
     if (count == 0) {
