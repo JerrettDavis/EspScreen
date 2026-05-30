@@ -29,6 +29,10 @@ static const uint16_t kCalData[5] = { 275, 3620, 264, 3532, 4 };
 static bool    s_debug_touch  = false;
 static uint32_t s_last_dbg_ms = 0;
 
+/* ── Idle raw heartbeat (rate-limited, ~300 ms) ─────────────────── */
+static uint32_t s_last_hw_ms  = 0;
+static constexpr uint32_t kHwLogIntervalMs = 300;
+
 /* ── Inject state (two-phase synthetic tap: 1=PRESSED, 2=RELEASED) ─ */
 static int8_t  s_inject_phase = 0;   // 0=idle, 1=emit PRESSED, 2=emit RELEASED
 static int16_t s_inject_x     = 0;
@@ -51,6 +55,19 @@ static void touch_read_cb(lv_indev_t* indev, lv_indev_data_t* data) {
     }
 
     TFT_eSPI* tft = display::get_tft();
+
+    /* Rate-limited raw heartbeat — gated by s_debug_touch (toggled by 'tdbg').
+     * Off by default so production serial isn't spammed.
+     * SUCCESS: real values like raw=(0,~3865); FAIL: raw=(8191,8191). */
+    uint32_t now_ms = millis();
+    if (s_debug_touch && now_ms - s_last_hw_ms >= kHwLogIntervalMs) {
+        s_last_hw_ms = now_ms;
+        uint16_t rx = 0, ry = 0;
+        tft->getTouchRaw(&rx, &ry);
+        uint16_t z = tft->getTouchRawZ();
+        Serial.printf("[hw] z=%u raw=(%u,%u)\n", z, rx, ry);
+    }
+
     uint16_t x, y;
     if (tft->getTouch(&x, &y)) {
         data->state   = LV_INDEV_STATE_PRESSED;
