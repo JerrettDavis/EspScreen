@@ -17,4 +17,13 @@ namespace touch {
      */
     void set_debug(bool enabled);
     bool get_debug();
+
+    /**
+     * Inject a synthetic one-shot tap at (x, y) in LVGL 320×480 coordinates.
+     * The tap is delivered on the next touch_read_cb cycle as PRESSED; the
+     * cycle after that falls through to hardware and reports RELEASED, giving
+     * LVGL a clean tap event.  If a previous inject is still pending it is
+     * silently dropped (no queue).
+     */
+    void inject(int16_t x, int16_t y);
 }

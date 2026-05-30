@@ -1,4 +1,5 @@
 #include "display.h"
+#include "../os/screen_mirror.h"
 #include <Arduino.h>
 #include <lvgl.h>
 #include <TFT_eSPI.h>
@@ -39,6 +40,8 @@ static void flush_cb(lv_display_t* disp, const lv_area_t* area, uint8_t* px_map)
     s_tft_global.setAddrWindow(area->x1, area->y1, w, h);
     s_tft_global.pushColors((uint16_t*)px_map, w * h, true);
     s_tft_global.endWrite();
+
+    if (screen_mirror::enabled()) screen_mirror::on_flush(area, px_map);
 
     lv_display_flush_ready(disp);
 }

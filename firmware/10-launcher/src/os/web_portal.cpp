@@ -20,6 +20,9 @@
 #include "claude_auth.h"
 #include "nvs_store.h"
 #include "logger.h"
+#include "config.h"
+#include "screen_mirror.h"
+#include "../hal/touch.h"
 #include <WebServer.h>
 #include <ArduinoJson.h>
 #include <Arduino.h>
@@ -317,6 +320,145 @@ static void handle_claude_tokens() {
     LOG_I("portal", "POST /api/claude/tokens ok label=%.20s", label);
 }
 
+/* ── GET /api/screen ─────────────────────────────────────────────────────── */
+
+static void handle_screen_get() {
+    /* Optional query params w/h; default to persisted config */
+    const config::MirrorCfg& mc = config::mirror();
+    int w = mc.out_width;
+    int h = mc.out_height;
+    if (s_server->hasArg("w")) {
+        int v = s_server->arg("w").toInt();
+        if (v > 0) w = v;
+    }
+    if (s_server->hasArg("h")) {
+        int v = s_server->arg("h").toInt();
+        if (v > 0) h = v;
+    }
+
+    bool ok = screen_mirror::write_bmp(*s_server, w, h);
+    if (!ok) {
+        send_json(503, "{\"error\":\"mirror disabled\"}");
+    }
+    LOG_I("portal", "GET /api/screen w=%d h=%d ok=%d", w, h, (int)ok);
+}
+
+/* ── POST /api/touch ─────────────────────────────────────────────────────── */
+
+static void handle_touch_post() {
+    if (!portal_authorized()) {
+        send_json(401, "{\"error\":\"unauthorized\"}");
+        return;
+    }
+    String body = s_server->arg("plain");
+    if (body.length() > 256) { send_json(413, "{\"error\":\"body too large\"}"); return; }
+    if (body.isEmpty()) {
+        send_json(400, "{\"error\":\"empty body\"}");
+        return;
+    }
+
+    JsonDocument doc;
+    if (deserializeJson(doc, body)) {
+        send_json(400, "{\"error\":\"json parse\"}");
+        return;
+    }
+
+    int x = doc["x"] | -1;
+    int y = doc["y"] | -1;
+    int w = doc["w"] | 0;
+    int h = doc["h"] | 0;
+
+    if (x < 0 || y < 0) {
+        send_json(400, "{\"error\":\"missing x or y\"}");
+        return;
+    }
+
+    /* Scale from rendered image coords to LVGL 320×480 space */
+    int lv_x = (int)((long)x * 320 / (w > 0 ? w : 1));
+    int lv_y = (int)((long)y * 480 / (h > 0 ? h : 1));
+    if (lv_x < 0)   lv_x = 0;
+    if (lv_x > 319) lv_x = 319;
+    if (lv_y < 0)   lv_y = 0;
+    if (lv_y > 479) lv_y = 479;
+
+    touch::inject((int16_t)lv_x, (int16_t)lv_y);
+    send_json(200, "{\"ok\":true}");
+    LOG_I("portal", "POST /api/touch x=%d y=%d → lv=%d,%d", x, y, lv_x, lv_y);
+}
+
+/* ── GET /api/mirror/config ──────────────────────────────────────────────── */
+
+static void handle_mirror_config_get() {
+    const config::MirrorCfg& mc = config::mirror();
+    String out = "{\"enabled\":";
+    out += mc.enabled ? "true" : "false";
+    out += ",\"interval_ms\":";
+    out += mc.interval_ms;
+    out += ",\"out_width\":";
+    out += mc.out_width;
+    out += ",\"out_height\":";
+    out += mc.out_height;
+    out += ",\"cap_w\":";
+    out += screen_mirror::CAP_W;
+    out += ",\"cap_h\":";
+    out += screen_mirror::CAP_H;
+    out += '}';
+    send_json(200, out);
+    LOG_I("portal", "GET /api/mirror/config");
+}
+
+/* ── POST /api/mirror/config ─────────────────────────────────────────────── */
+
+static void handle_mirror_config_post() {
+    if (!portal_authorized()) {
+        send_json(401, "{\"error\":\"unauthorized\"}");
+        return;
+    }
+    String body = s_server->arg("plain");
+    if (body.length() > 256) { send_json(413, "{\"error\":\"body too large\"}"); return; }
+    if (body.isEmpty()) {
+        send_json(400, "{\"error\":\"empty body\"}");
+        return;
+    }
+
+    JsonDocument doc;
+    if (deserializeJson(doc, body)) {
+        send_json(400, "{\"error\":\"json parse\"}");
+        return;
+    }
+
+    /* Start from current config; overwrite only provided fields */
+    config::MirrorCfg updated = config::mirror();
+    if (doc.containsKey("enabled"))     updated.enabled     = doc["enabled"].as<bool>();
+    if (doc.containsKey("interval_ms")) updated.interval_ms = doc["interval_ms"].as<int>();
+    if (doc.containsKey("out_width"))   updated.out_width   = doc["out_width"].as<int>();
+    if (doc.containsKey("out_height"))  updated.out_height  = doc["out_height"].as<int>();
+
+    /* clamp + persist */
+    config::set_mirror(updated);
+
+    /* Apply enabled-state live */
+    screen_mirror::enable(config::mirror().enabled);
+
+    /* Respond with effective (clamped) config — same shape as GET */
+    const config::MirrorCfg& mc = config::mirror();
+    String out = "{\"enabled\":";
+    out += mc.enabled ? "true" : "false";
+    out += ",\"interval_ms\":";
+    out += mc.interval_ms;
+    out += ",\"out_width\":";
+    out += mc.out_width;
+    out += ",\"out_height\":";
+    out += mc.out_height;
+    out += ",\"cap_w\":";
+    out += screen_mirror::CAP_W;
+    out += ",\"cap_h\":";
+    out += screen_mirror::CAP_H;
+    out += '}';
+    send_json(200, out);
+    LOG_I("portal", "POST /api/mirror/config enabled=%d interval=%d", (int)mc.enabled, mc.interval_ms);
+}
+
 /* ── OPTIONS preflight (CORS) ────────────────────────────────────────────── */
 
 static void handle_options() {
@@ -371,6 +513,15 @@ void begin(bool ap_mode) {
     s_server->on("/api/claude/profile",    HTTP_OPTIONS, handle_options);
     s_server->on("/api/claude/tokens",     HTTP_POST,    handle_claude_tokens);
     s_server->on("/api/claude/tokens",     HTTP_OPTIONS, handle_options);
+
+    /* Screen mirror — GET open (read-only), POST auth-guarded */
+    s_server->on("/api/screen",            HTTP_GET,     handle_screen_get);
+    s_server->on("/api/screen",            HTTP_OPTIONS, handle_options);
+    s_server->on("/api/touch",             HTTP_POST,    handle_touch_post);
+    s_server->on("/api/touch",             HTTP_OPTIONS, handle_options);
+    s_server->on("/api/mirror/config",     HTTP_GET,     handle_mirror_config_get);
+    s_server->on("/api/mirror/config",     HTTP_POST,    handle_mirror_config_post);
+    s_server->on("/api/mirror/config",     HTTP_OPTIONS, handle_options);
 
     /* Captive portal probe URLs — only redirect in AP mode, but register always
      * so that end() and begin(false) don't leave stale handlers */

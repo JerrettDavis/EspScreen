@@ -32,11 +32,21 @@ namespace config {
     struct AppsCfg {
         char autostart[32];
     };
+    struct MirrorCfg {
+        bool enabled;
+        int  interval_ms;
+        int  out_width;
+        int  out_height;
+    };
 
     const DisplayCfg& display();
     const NetworkCfg& network();
     const DeviceCfg&  device();
     const AppsCfg&    apps();
+    const MirrorCfg&  mirror();
+
+    /** Clamp, store, persist (save_config). Returns true on success. */
+    bool set_mirror(const MirrorCfg& m);
 
     /**
      * save_config() — persist the current config to LittleFS /config.json.
