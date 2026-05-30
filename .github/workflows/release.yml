@@ -72,6 +72,9 @@ jobs:
             echo "boot_app0.bin not found — will omit from merged image"
           fi
 
+      - name: Install esptool
+        run: python -m pip install --upgrade esptool
+
       - name: Merge into single flashable image
         run: |
           BUILD=firmware/10-launcher/.pio/build/esp32dev
@@ -80,16 +83,16 @@ jobs:
           # Partition offsets (from firmware/10-launcher/partitions.csv):
           #   bootloader  -> 0x1000   (ESP32 standard)
           #   partitions  -> 0x8000   (ESP32 standard)
-          #   otadata     -> 0xe000   (from partitions.csv)
-          #   app0        -> 0x10000  (from partitions.csv)
-          #   spiffs/lfs  -> 0x310000 (from partitions.csv)
+          #   otadata     -> 0xe000   (from partitions.csv: otadata data ota 0xe000 0x2000)
+          #   app0        -> 0x10000  (from partitions.csv: app0 app ota_0 0x10000 0x180000)
+          #   spiffs/lfs  -> 0x310000 (from partitions.csv: spiffs data spiffs 0x310000 0xC0000)
 
           # Build the merge command as an array for correct quoting
           MERGE_CMD=(
-            --chip esp32 merge_bin
+            --chip esp32 merge-bin
             -o "${OUTPUT}"
-            --flash_mode dio
-            --flash_size 4MB
+            --flash-mode dio
+            --flash-size 4MB
             0x1000   "${BUILD}/bootloader.bin"
             0x8000   "${BUILD}/partitions.bin"
           )
@@ -103,8 +106,8 @@ jobs:
             0x310000 "${FS_IMAGE}"
           )
 
-          echo "Running esptool.py merge_bin with ${#MERGE_CMD[@]} arguments"
-          pio pkg exec -d firmware/10-launcher -e esp32dev -- esptool.py "${MERGE_CMD[@]}"
+          echo "Running esptool merge-bin with ${#MERGE_CMD[@]} arguments"
+          python -m esptool "${MERGE_CMD[@]}"
 
           echo "MERGED_BIN=${OUTPUT}" >> "$GITHUB_ENV"
           ls -lh "${OUTPUT}"
