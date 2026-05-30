@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Token refresh tool** (`tools/creds-watcher/refresh.js`) — host-side Claude
+  OAuth access-token renewal. Performs a `refresh_token` grant, writes the result
+  atomically (`.bak` + `.tmp` rename), preserves all other credentials-file keys,
+  and reuses the existing `push.js` path to sync fresh tokens to the ESP32.
+  Pure-function helpers extracted to `refresh-lib.mjs` for testability.
+- **Task Scheduler wrapper** (`scripts/refresh-claude-token.ps1`) — runs
+  `refresh.js`, tees timestamped output to `~/.espscreen/token-refresh.log`,
+  forwards `node`'s exit code.
+- **Task Scheduler registration** (`scripts/register-token-refresh-task.ps1`) —
+  registers "EspScreen Claude Token Refresh" task (at-logon + every 1 hour) with
+  5-minute execution limit and auto-restart on failure.
+- **Unit tests** (`tools/creds-watcher/test_refresh.mjs`) — 38 `node:test` cases
+  covering `needsRefresh`, `isValidTokenResponse`, `mergeRefreshed`,
+  `buildRefreshBody`, `redactToken`, and `toExpiresAtSeconds`.
+
 ---
 
 ## [0.1.0] — 2026-05-28

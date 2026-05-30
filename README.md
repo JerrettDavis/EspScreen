@@ -186,6 +186,7 @@ Host-side Node.js utilities (Node ≥ 18, no global installs required):
 |------|---------|--------|
 | `tools/provision` | Push Claude OAuth tokens + WiFi to the board over USB serial | [provision/README.md](tools/provision/README.md) |
 | `tools/creds-watcher` | Watch `~/.claude/.credentials.json` and auto-push refreshed tokens | [creds-watcher/README.md](tools/creds-watcher/README.md) |
+| `tools/creds-watcher/refresh.js` | Proactively renew the host OAuth access token and push to the device; designed for Task Scheduler / headless use | [creds-watcher/README.md — Token Refresh](tools/creds-watcher/README.md#token-refresh) |
 | `tools/claude-endpoint` | Local HTTP server exposing Claude usage JSON for the on-board widget | [claude-endpoint/README.md](tools/claude-endpoint/README.md) |
 
 ```sh
