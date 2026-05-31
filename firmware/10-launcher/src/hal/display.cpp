@@ -1,5 +1,8 @@
 #include "display.h"
 #include "../os/screen_mirror.h"
+#ifdef FB_STREAM
+#include "../os/fb_stream.h"
+#endif
 #include <Arduino.h>
 #include <lvgl.h>
 #include <TFT_eSPI.h>
@@ -42,6 +45,12 @@ static void flush_cb(lv_display_t* disp, const lv_area_t* area, uint8_t* px_map)
     s_tft_global.endWrite();
 
     if (screen_mirror::enabled()) screen_mirror::on_flush(area, px_map);
+
+#ifdef FB_STREAM
+    /* Live framebuffer tap (debug builds only): streams the raw RGB565-LE
+     * px_map — what LVGL drew, BEFORE the hardware byte-swap above. */
+    fb_stream::on_flush(area, px_map);
+#endif
 
     lv_display_flush_ready(disp);
 }

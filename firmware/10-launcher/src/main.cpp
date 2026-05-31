@@ -49,6 +49,9 @@
 #include "ui/theme.h"
 #include "app/builtin/launcher.h"
 #include "app/builtin/claude_widget.h"
+#ifdef FB_STREAM
+#include "os/fb_stream.h"
+#endif
 
 /* ── Non-blocking serial command reader ─────────────────────────── */
 static String s_serial_buf;
@@ -112,6 +115,11 @@ void setup() {
 
     /* ── Claude auth init (profile validation) ───────────────────── */
     claude_auth::init();
+
+#ifdef FB_STREAM
+    /* Live framebuffer streamer (debug only) — start after WiFi/net is up. */
+    fb_stream::init();
+#endif
 
     /* ── Build and load the launcher screen ─────────────────────── */
     lv_obj_t* home = launcher::create_screen();
@@ -553,6 +561,10 @@ void loop() {
     /* api_server pumps its WebServer(:8080) — started by net_manager
      * on STA connect; handle() is a no-op until begin() has been called. */
     api_server::handle();
+
+#ifdef FB_STREAM
+    fb_stream::loop();   /* accept viewer + push a full frame on connect */
+#endif
 
     if (s_loop_count < 100) {
         s_loop_count++;
