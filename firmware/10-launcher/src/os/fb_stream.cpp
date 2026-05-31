@@ -64,13 +64,29 @@ void init() {
 void loop() {
     if (!s_started) return;
 
-    /* Accept a new client (single-client model: replace any old one). */
-    if (s_server.hasClient()) {
+    /* Accept a new client (single-client model: replace any old one).
+     * accept() == available() on this Arduino-ESP32 core; both call lwip_accept
+     * and consume the fd cached by hasClient(). Use accept() unconditionally so
+     * a single lwip_accept call both detects AND returns the client (avoids the
+     * hasClient()+available() double-accept ordering that could drop the fd). */
+    WiFiClient incoming = s_server.accept();
+    if (incoming) {
         if (s_client && s_client.connected()) s_client.stop();
-        s_client = s_server.available();
+        s_client = incoming;
         s_client.setNoDelay(true);
         s_need_full_frame = true;
         Serial.println("[fb_stream] client connected");
+    }
+
+    /* 1 Hz heartbeat so the accept/client state is visible on serial. */
+    static uint32_t s_last_hb = 0;
+    uint32_t now = millis();
+    if (now - s_last_hb >= 1000) {
+        s_last_hb = now;
+        Serial.printf("[fb_stream] hb: client=%d connected=%d need_frame=%d\n",
+                      (int)(bool)s_client,
+                      (int)(s_client ? s_client.connected() : 0),
+                      (int)s_need_full_frame);
     }
 
     /* On (re)connect, force a full redraw so the viewer gets a whole frame. */
@@ -78,9 +94,11 @@ void loop() {
         s_need_full_frame = false;
         lv_obj_t* scr = lv_scr_act();
         if (scr) {
+            Serial.println("[fb_stream] forcing full-screen redraw for new client");
             lv_obj_invalidate(scr);
             lv_refr_now(NULL);     /* triggers flush_cb tiles for the whole screen */
             frame_end();
+            Serial.printf("[fb_stream] full frame streamed (seq now %u)\n", s_seq);
         }
     }
 }
