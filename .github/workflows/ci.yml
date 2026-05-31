@@ -78,7 +78,7 @@ jobs:
         run: pip install platformio
 
       - name: Run native tests
-        run: pio test -d firmware/10-launcher -e native
+        run: pio test -d firmware/10-launcher -e test_native -f test_native
 
   node-tests:
     name: "Node tool tests"

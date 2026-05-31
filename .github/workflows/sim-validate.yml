@@ -1,0 +1,102 @@
+name: Sim Validate (layout + golden pixel diff)
+
+# Host-only LVGL screen gate for firmware/10-launcher:
+#   1. layout validator suite (R1 out-of-bounds / R2 overlap are blocking FAILs;
+#      R3/R4/R5 are reported as WARN and do NOT block)
+#   2. golden pixel-diff over all 9 screens (EXACT match, 0 tolerance)
+#
+# Runs on windows-latest so the toolchain (PlatformIO + bundled MinGW gcc) matches
+# the machine the committed goldens were generated on — exact-match diffing
+# requires byte-identical rendering. The interactive GDI [env:sim] is NOT built
+# in CI (it needs a real window station); only the headless [env:test_native]
+# path is exercised here. The device [env:esp32dev] build is a cheap extra guard.
+
+on:
+  push:
+    paths:
+      - 'firmware/10-launcher/**'
+      - '.github/workflows/sim-validate.yml'
+  pull_request:
+    paths:
+      - 'firmware/10-launcher/**'
+      - '.github/workflows/sim-validate.yml'
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  sim-validate:
+    name: "Layout validator + golden diff (host)"
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Cache PlatformIO and pip
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.platformio
+            ~/.cache/pip
+          key: pio-sim-${{ runner.os }}-${{ hashFiles('firmware/10-launcher/platformio.ini') }}
+          restore-keys: |
+            pio-sim-${{ runner.os }}-
+
+      - name: Install PlatformIO
+        run: pip install --upgrade platformio
+
+      # ── Gate 1: layout validator (blocks on R1/R2 FAILs) ──────────────────────
+      - name: Layout validator suite
+        run: pio test -d firmware/10-launcher -e test_native -f test_validate
+
+      # ── Gate 2: golden pixel-diff (exact match over all 9 screens) ────────────
+      - name: Build headless renderer
+        run: pio run -d firmware/10-launcher -e test_native
+
+      - name: Golden pixel diff
+        working-directory: firmware/10-launcher
+        run: ./.pio/build/test_native/program.exe --diff
+
+      - name: Upload mismatch artifacts (.actual.png) on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: golden-mismatch-actuals
+          path: firmware/10-launcher/sim/_artifacts/*.actual.png
+          if-no-files-found: ignore
+
+  # Cheap extra guard: device build must still compile (does not gate on goldens).
+  device-build:
+    name: "Device build (esp32dev) compile guard"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Cache PlatformIO and pip
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.platformio
+            ~/.cache/pip
+          key: pio-dev-${{ runner.os }}-${{ hashFiles('firmware/10-launcher/platformio.ini') }}
+          restore-keys: |
+            pio-dev-${{ runner.os }}-
+
+      - name: Install PlatformIO
+        run: pip install --upgrade platformio
+
+      - name: Build esp32dev
+        run: pio run -d firmware/10-launcher -e esp32dev
