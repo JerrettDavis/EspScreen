@@ -617,14 +617,14 @@ lv_obj_t* create_screen() {
     lv_obj_add_style(s_lbl_updated, ui_theme::style_text_muted(), 0);
     lv_obj_align(s_lbl_updated, LV_ALIGN_LEFT_MID, tok::SP_S, 0);
 
-    /* Refresh button — right side (ghost style; widened for ASCII "Refresh" text) */
+    /* Refresh button — right side (ghost style); FontAwesome refresh glyph (in font) */
     lv_obj_t* refresh_btn = lv_button_create(botbar);
-    lv_obj_set_size(refresh_btn, 88, 32);
+    lv_obj_set_size(refresh_btn, 48, 32);
     lv_obj_align(refresh_btn, LV_ALIGN_RIGHT_MID, -tok::SP_S, 0);
     lv_obj_add_style(refresh_btn, ui_theme::style_btn_ghost(), 0);
     lv_obj_add_event_cb(refresh_btn, refresh_btn_cb, LV_EVENT_CLICKED, NULL);
     lv_obj_t* refresh_lbl = lv_label_create(refresh_btn);
-    lv_label_set_text(refresh_lbl, "Refresh");   // ASCII (glyph-safe; FA glyphs tofu on this panel)
+    lv_label_set_text(refresh_lbl, LV_SYMBOL_REFRESH);
     lv_obj_center(refresh_lbl);
 
     /* Timers:

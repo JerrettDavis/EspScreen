@@ -8,14 +8,17 @@
 
 namespace app_registry {
 
-/* Icons are short ASCII mnemonics (in Basic-Latin font range), NOT LV_SYMBOL_*
- * FontAwesome glyphs — those render as tofu boxes on this panel. */
+/* FontAwesome LV_SYMBOL_* tile icons. make_tile draws the icon in montserrat_20
+ * (ui_theme::style_title). The symbol glyph range IS compiled into both
+ * montserrat_14 and _20 in this LVGL build and renders correctly on the ST7796
+ * panel (verified on-glass + via device-framebuffer capture), so the earlier
+ * ASCII-mnemonic workaround for "tofu" is no longer needed. */
 const AppEntry kBuiltinApps[] = {
-    { "settings",      "Settings",      "S",  settings::create_screen       },
-    { "touch_test",    "Touch Test",    "T",  touch_test::create_screen     },
-    { "about",         "About",         "i",  about::create_screen          },
-    { "claude",        "Claude Usage",  "C",  claude_widget::create_screen  },
-    { "calculator",    "Calculator",    "=",  calculator_stub::create_screen },
+    { "settings",      "Settings",      LV_SYMBOL_SETTINGS, settings::create_screen       },
+    { "touch_test",    "Touch Test",    LV_SYMBOL_OK,       touch_test::create_screen     },
+    { "about",         "About",         LV_SYMBOL_LIST,     about::create_screen          },
+    { "claude",        "Claude Usage",  LV_SYMBOL_WIFI,     claude_widget::create_screen  },
+    { "calculator",    "Calculator",    LV_SYMBOL_EDIT,     calculator_stub::create_screen },
 };
 
 const int kBuiltinAppCount = sizeof(kBuiltinApps) / sizeof(kBuiltinApps[0]);

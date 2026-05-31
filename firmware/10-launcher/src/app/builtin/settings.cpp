@@ -196,7 +196,7 @@ static lv_obj_t* create_wifi_networks_screen() {
     }, LV_EVENT_CLICKED, NULL);
 
     lv_obj_t* scan_lbl = lv_label_create(scan_btn);
-    lv_label_set_text(scan_lbl, "Scan & Add Network");
+    lv_label_set_text(scan_lbl, LV_SYMBOL_WIFI " Scan & Add Network");
     lv_obj_center(scan_lbl);
 
     /* Serial hint */
@@ -256,16 +256,16 @@ lv_obj_t* create_screen() {
     snprintf(claude_buf, sizeof(claude_buf), "(%u/%u)",
              p_count, (uint8_t)claude_auth::MAX_PROFILES);
     widgets::make_list_row(content, "Claude Profiles", claude_buf,
-                           ">", claude_tile_cb, nullptr);
+                           LV_SYMBOL_RIGHT, claude_tile_cb, nullptr);
 
     /* 2. WiFi Networks row */
     uint8_t n_count = wifi_profiles::network_count();
     char wifi_buf[48];
     snprintf(wifi_buf, sizeof(wifi_buf), "(%u/%u)%s",
              n_count, (uint8_t)wifi_profiles::MAX_NETWORKS,
-             wifi_profiles::is_connected() ? "  *" : "");
+             wifi_profiles::is_connected() ? "  " LV_SYMBOL_BULLET : "");
     widgets::make_list_row(content, "WiFi Networks", wifi_buf,
-                           ">", wifi_tile_cb, nullptr);
+                           LV_SYMBOL_RIGHT, wifi_tile_cb, nullptr);
 
     /* 3. Divider */
     widgets::make_divider(content);

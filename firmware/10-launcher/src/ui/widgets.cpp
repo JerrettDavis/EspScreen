@@ -35,7 +35,7 @@ lv_obj_t* make_topbar(lv_obj_t* parent, const char* title,
                          LV_PART_MAIN | LV_STATE_PRESSED);
 
         lv_obj_t* arrow = lv_label_create(btn);
-        lv_label_set_text(arrow, "<");   // ASCII back marker (glyph-safe)
+        lv_label_set_text(arrow, LV_SYMBOL_LEFT);   // FontAwesome back chevron (in font)
         lv_obj_center(arrow);
 
         lv_obj_add_event_cb(btn, back_cb, LV_EVENT_CLICKED, NULL);
