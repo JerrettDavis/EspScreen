@@ -74,7 +74,14 @@ void init() {
     lv_display_set_buffers(disp, draw_buf, nullptr, sizeof(draw_buf),
                            LV_DISPLAY_RENDER_MODE_PARTIAL);
 
-    /* 4. Enable backlight (active HIGH per platformio.ini) */
+    /* 4. Black-fill the panel before enabling backlight so the user never
+     *    sees uninitialized GRAM garbage on power-on.  TFT_RST=-1 means the
+     *    ST7796 has no hardware reset, leaving GRAM in a noisy state until the
+     *    first real frame is flushed.  Filling it black here — while the
+     *    backlight is still off — eliminates the brief pixel-garbage flash. */
+    s_tft_global.fillScreen(TFT_BLACK);
+
+    /* Enable backlight (active HIGH per platformio.ini) */
     pinMode(27, OUTPUT);
     digitalWrite(27, HIGH);
 }

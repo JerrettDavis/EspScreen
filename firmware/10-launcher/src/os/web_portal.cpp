@@ -307,14 +307,42 @@ static void handle_claude_tokens() {
         return;
     }
 
-    /* Use the SAME function api_server uses — zero new token logic */
+    /* Use the SAME function api_server uses — zero new token logic.
+     * On first boot (no profiles yet) the label won't exist, so auto-create
+     * it here rather than returning 404 and forcing a two-step flow in the
+     * captive portal. Mirrors what handle_claude_profile() does. */
     if (!claude_auth::set_tokens_by_label(label, access, refresh_tk, expires_at)) {
-        String errMsg = "{\"error\":\"profile '";
-        errMsg += label;
-        errMsg += "' not found or token store failed\"}";
-        send_json(404, errMsg);
-        LOG_W("portal", "POST /api/claude/tokens 404 label=%.20s", label);
-        return;
+        /* Profile not found — attempt to auto-create it, then retry.
+         * add_profile() returns 255 for BOTH "max profiles reached" AND
+         * "label already exists", so on 255 fall through to find_by_label():
+         * a prior (retried) POST from the same browser may have already created
+         * the profile. Only fail with 500 if it truly does not exist. */
+        uint8_t new_idx = claude_auth::add_profile(label);
+        if (new_idx == 255) {
+            new_idx = claude_auth::find_by_label(label);  // may already exist (retry/race)
+            if (new_idx == 255) {
+                String errMsg = "{\"error\":\"profile '";
+                errMsg += label;
+                errMsg += "' not found and could not be created (max profiles reached?)\"}";
+                send_json(500, errMsg);
+                LOG_W("portal", "POST /api/claude/tokens auto-create failed label=%.20s", label);
+                return;
+            }
+            LOG_I("portal", "POST /api/claude/tokens profile already existed idx=%u label=%.20s",
+                  (unsigned)new_idx, label);
+        } else {
+            LOG_I("portal", "POST /api/claude/tokens auto-created profile idx=%u label=%.20s",
+                  (unsigned)new_idx, label);
+        }
+        /* Retry set_tokens now that the profile exists */
+        if (!claude_auth::set_tokens_by_label(label, access, refresh_tk, expires_at)) {
+            String errMsg = "{\"error\":\"token store failed after auto-create for '";
+            errMsg += label;
+            errMsg += "'\"}";
+            send_json(500, errMsg);
+            LOG_W("portal", "POST /api/claude/tokens store failed after auto-create label=%.20s", label);
+            return;
+        }
     }
 
     send_json(200, "{\"ok\":true}");

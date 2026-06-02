@@ -17,6 +17,7 @@
 #if __has_include("os/net_manager.h")
 #  include "os/net_manager.h"
 #endif
+#include "../../os/config.h"
 #include <lvgl.h>
 #include <Arduino.h>
 
@@ -315,7 +316,24 @@ lv_obj_t* create_screen() {
             : lv_color_hex(tok::TEXT_MUTED), LV_PART_MAIN);
 #endif
 
-    /* 5. Info hint */
+    /* 5. IP address */
+    lv_obj_t* ip_lbl = lv_label_create(content);
+#if __has_include("os/net_manager.h")
+    {
+        String ip_str = net_manager::ip_string();
+        lv_label_set_text(ip_lbl, ip_str.c_str());
+    }
+#else
+    lv_label_set_text(ip_lbl, "-");
+#endif
+    lv_obj_add_style(ip_lbl, ui_theme::style_text_muted(), LV_PART_MAIN);
+
+    /* 6. Hostname */
+    lv_obj_t* hostname_lbl = lv_label_create(content);
+    lv_label_set_text(hostname_lbl, config::network().hostname);
+    lv_obj_add_style(hostname_lbl, ui_theme::style_text_muted(), LV_PART_MAIN);
+
+    /* 7. Info hint */
     lv_obj_t* info_lbl = lv_label_create(content);
     lv_label_set_text(info_lbl, "Touch: factory cal (Phase 0)");
     lv_obj_add_style(info_lbl, ui_theme::style_text_muted(), LV_PART_MAIN);

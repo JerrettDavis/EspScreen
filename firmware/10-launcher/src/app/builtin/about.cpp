@@ -1,5 +1,7 @@
 #include "about.h"
 #include "../../os/screen_router.h"
+#include "../../os/net_manager.h"
+#include "../../os/config.h"
 #include "../../ui/widgets.h"
 #include "../../ui/theme.h"
 #include "../../ui/tokens.h"
@@ -36,6 +38,14 @@ lv_obj_t* create_screen() {
     char heap_str[32];
     snprintf(heap_str, sizeof(heap_str), "%lu B", (unsigned long)esp_get_free_heap_size());
     lv_label_set_text(heap_val, heap_str);
+
+    /* IP address */
+    lv_obj_t* ip_val = widgets::make_kv_row(card, "IP address");
+    lv_label_set_text(ip_val, net_manager::ip_string().c_str());
+
+    /* Hostname */
+    lv_obj_t* hostname_val = widgets::make_kv_row(card, "Hostname");
+    lv_label_set_text(hostname_val, config::network().hostname);
 
     return scr;
 }
