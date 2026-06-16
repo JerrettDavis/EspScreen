@@ -12,6 +12,7 @@ name: Sim Validate (layout + golden pixel diff)
 # path is exercised here. The device [env:esp32dev] build is a cheap extra guard.
 
 on:
+  workflow_dispatch:
   push:
     paths:
       - 'firmware/10-launcher/**'
