@@ -9,8 +9,8 @@
     "refresh": "node refresh.js"
   },
   "dependencies": {
-    "chokidar": "^3.6.0",
-    "serialport": "^12.0.0"
+    "chokidar": "^5.0.0",
+    "serialport": "^13.0.0"
   },
   "engines": {
     "node": ">=18"
