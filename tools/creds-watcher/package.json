@@ -9,7 +9,7 @@
     "refresh": "node refresh.js"
   },
   "dependencies": {
-    "chokidar": "^5.0.0",
+    "chokidar": "^6.0.0",
     "serialport": "^13.0.0"
   },
   "engines": {
