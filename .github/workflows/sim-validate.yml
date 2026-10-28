@@ -17,10 +17,10 @@ on:
     paths:
       - 'firmware/10-launcher/**'
       - '.github/workflows/sim-validate.yml'
+  # No path filter on pull_request: these jobs are required status checks on main,
+  # and a path-filtered workflow never reports on unrelated PRs (e.g. tools/ npm bumps),
+  # leaving them BLOCKED forever.
   pull_request:
-    paths:
-      - 'firmware/10-launcher/**'
-      - '.github/workflows/sim-validate.yml'
 
 defaults:
   run:
